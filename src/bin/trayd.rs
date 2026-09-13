@@ -775,13 +775,21 @@ async fn reannounce_loop(probe: zbus::Connection, icons: Vec<ManagedIcon>) {
 
 /// Freedesktop icon names below the boundary in [`u8`] percent, matching
 /// the row NetworkManager applets themselves use: 80/60/40/20.
+///
+/// `-symbolic`, not the plain name most NetworkManager applets use: the
+/// plain form is a full-colour icon, and the other three items in this
+/// tray (Bluetooth, keep awake, night light) are all symbolic already.
+/// One colourful icon among three monochrome ones was the whole
+/// complaint this rule exists to prevent. Confirmed present at both
+/// `status/22` and `status/24` in `breeze` and `breeze-dark` on this
+/// machine — the family every name in this file now shares.
 fn wifi_signal_icon(strength: u8) -> &'static str {
     match strength {
-        80..=u8::MAX => "network-wireless-signal-excellent",
-        60..=79 => "network-wireless-signal-good",
-        40..=59 => "network-wireless-signal-ok",
-        20..=39 => "network-wireless-signal-weak",
-        _ => "network-wireless-signal-none",
+        80..=u8::MAX => "network-wireless-signal-excellent-symbolic",
+        60..=79 => "network-wireless-signal-good-symbolic",
+        40..=59 => "network-wireless-signal-ok-symbolic",
+        20..=39 => "network-wireless-signal-weak-symbolic",
+        _ => "network-wireless-signal-none-symbolic",
     }
 }
 
@@ -826,7 +834,7 @@ fn network_item(
             category: Category::Hardware,
             status: TrayStatus::Passive,
             title,
-            icon_name: "network-wireless-disconnected".to_string(),
+            icon_name: "network-wireless-disconnected-symbolic".to_string(),
             tooltip_title: "Wi-Fi is off".to_string(),
             tooltip_body: String::new(),
         },
@@ -851,7 +859,7 @@ fn network_item(
                 category: Category::Hardware,
                 status: TrayStatus::Active,
                 title,
-                icon_name: "network-wireless-disconnected".to_string(),
+                icon_name: "network-wireless-disconnected-symbolic".to_string(),
                 tooltip_title: "Not connected".to_string(),
                 tooltip_body: "Wi-Fi is on".to_string(),
             },
@@ -1606,12 +1614,12 @@ mod tests {
     // ships: an unresolvable icon name renders as a blank gap, with
     // nothing logged anywhere to say why.
     const NETWORK_ICON_NAMES: &[&str] = &[
-        "network-wireless-signal-excellent",
-        "network-wireless-signal-good",
-        "network-wireless-signal-ok",
-        "network-wireless-signal-weak",
-        "network-wireless-signal-none",
-        "network-wireless-disconnected",
+        "network-wireless-signal-excellent-symbolic",
+        "network-wireless-signal-good-symbolic",
+        "network-wireless-signal-ok-symbolic",
+        "network-wireless-signal-weak-symbolic",
+        "network-wireless-signal-none-symbolic",
+        "network-wireless-disconnected-symbolic",
         "dialog-warning",
     ];
     const BLUETOOTH_ICON_NAMES: &[&str] = &["network-bluetooth-activated-symbolic", "network-bluetooth-inactive-symbolic", "dialog-warning"];
@@ -1620,27 +1628,48 @@ mod tests {
     // quietest failure in this daemon: the bar draws a blank gap, and
     // nothing logs anything at any layer.
     //
-    // The names here are not the prettiest available. GNOME's
-    // `night-light-symbolic` is the obvious choice for night light and
-    // exists only in Adwaita, so it vanishes on a Breeze-derived theme;
-    // `redshift-status-*` ships far more widely because redshift is the
-    // application every theme drew an icon for. Likewise
-    // `network-bluetooth-*` over `bluetooth-*`, which several themes
-    // never had.
+    // All four items now draw from the same family on purpose: a
+    // `-symbolic` name under `status/` in KDE's Breeze icon set, which
+    // this machine's configured theme (Dracula) actually reaches —
+    // `Dracula`'s `Inherits=` line names `Papirus-Dark`, `breeze-dark`,
+    // `Zafiro`, `ubuntu-mono-dark`, `Mint-X`, `elementary` and `gnome`,
+    // but only `breeze-dark` (and, through it, `breeze`) is actually
+    // installed here. Adwaita is not in that chain at all, no matter how
+    // standard a name of its sounds — it was the wrong place to look for
+    // any of these four, which is why picking a name because it "sounds
+    // right" is exactly the mistake this whole file's live-checked
+    // approach exists to catch.
     //
-    // Confirmed present in both Adwaita and Breeze's own icon trees on
-    // this machine (`/usr/share/icons/{Adwaita,breeze}`), unlike most of
-    // the other names in this file, which only Adwaita ships — the
-    // closest thing to a cross-desktop-environment standard available
-    // for "prevent/allow the machine to sleep".
+    // Before this, Wi-Fi alone used the plain (full-colour) name —
+    // `network-wireless-signal-*` rather than `-*-symbolic` — which is
+    // the one colourful icon the rest of this tray's monochrome row was
+    // complained about. It is now `-symbolic` throughout, matching
+    // Bluetooth's `network-bluetooth-*-symbolic`, which was already
+    // right.
+    //
+    // `redshift-status-on`/`-off` reads better as GNOME's
+    // `night-light-symbolic`, but that name exists only in Adwaita and
+    // is unreachable from this chain, exactly like the Adwaita names
+    // above; `redshift-status-*-symbolic` is a real file (a symlink to
+    // the plain SVG, itself already monochrome enough that Breeze never
+    // bothered to draw a separate symbolic version) in both `breeze` and
+    // `breeze-dark`, so it is what stays.
+    //
+    // `changes-prevent-symbolic`/`changes-allow-symbolic` needed no
+    // change — already symbolic, already present in `breeze-dark`.
+    //
+    // `dialog-warning`/`dialog-information` are the shared error
+    // fallback all four items use identically when their backend is
+    // unavailable, so a full-colour dialog icon appearing on top of an
+    // otherwise-symbolic row is not the same defect as one item's normal
+    // icon permanently differing from the other three's — it is a rare,
+    // uniform, attention-getting state, and Breeze (like hicolor, the
+    // end of this chain) ships no `-symbolic` variant of either to
+    // switch to. Adwaita has both — `symbolic/status/dialog-warning-
+    // symbolic.svg` — but is unreachable here, so naming it would trade
+    // a real icon for a blank gap. Left as-is.
     const KEEP_AWAKE_ICON_NAMES: &[&str] =
         &["changes-prevent-symbolic", "changes-allow-symbolic", "dialog-warning"];
-    // `redshift-status-on`/`-off`, rather than GNOME's
-    // `night-light-symbolic`, which reads better and exists only in
-    // Adwaita. This machine's theme inherits Breeze rather than Adwaita,
-    // so the GNOME name resolved to nothing at all — the icon was simply
-    // absent from the bar, which is how this whole class of bug is
-    // found: by looking, not by testing a name against a list.
     const NIGHT_LIGHT_ICON_NAMES: &[&str] = &[
         "redshift-status-on-symbolic",
         "redshift-status-off-symbolic",
@@ -1705,16 +1734,16 @@ mod tests {
     #[test]
     fn signal_strength_maps_to_the_right_icon_at_its_boundaries() {
         let cases: &[(u8, &str)] = &[
-            (100, "network-wireless-signal-excellent"),
-            (80, "network-wireless-signal-excellent"),
-            (79, "network-wireless-signal-good"),
-            (60, "network-wireless-signal-good"),
-            (59, "network-wireless-signal-ok"),
-            (40, "network-wireless-signal-ok"),
-            (39, "network-wireless-signal-weak"),
-            (20, "network-wireless-signal-weak"),
-            (19, "network-wireless-signal-none"),
-            (0, "network-wireless-signal-none"),
+            (100, "network-wireless-signal-excellent-symbolic"),
+            (80, "network-wireless-signal-excellent-symbolic"),
+            (79, "network-wireless-signal-good-symbolic"),
+            (60, "network-wireless-signal-good-symbolic"),
+            (59, "network-wireless-signal-ok-symbolic"),
+            (40, "network-wireless-signal-ok-symbolic"),
+            (39, "network-wireless-signal-weak-symbolic"),
+            (20, "network-wireless-signal-weak-symbolic"),
+            (19, "network-wireless-signal-none-symbolic"),
+            (0, "network-wireless-signal-none-symbolic"),
         ];
         for &(strength, expected) in cases {
             assert_eq!(
@@ -1776,7 +1805,7 @@ mod tests {
         );
         assert_eq!(item.tooltip_title, "Coffee Shop");
         assert!(item.tooltip_body.contains("72"));
-        assert_eq!(item.icon_name, "network-wireless-signal-good");
+        assert_eq!(item.icon_name, "network-wireless-signal-good-symbolic");
     }
 
     #[test]

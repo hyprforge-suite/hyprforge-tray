@@ -113,9 +113,14 @@ impl ItemInterface {
         Vec::new()
     }
 
-    /// `false` means a left-click should call [`Self::activate`] rather
-    /// than open a menu. Since this suite serves no `com.canonical.dbusmenu`
-    /// yet, saying `true` here would make every click do nothing at all.
+    /// `false`: a left-click calls [`Self::activate`] rather than
+    /// opening a menu. The spec's own wording for `true` is that the
+    /// item *only* supports the context menu — not the case here, since
+    /// every icon has a primary action (open the Settings screen it is
+    /// about) that a left click should reach directly, menu or no menu.
+    /// The menu — which does exist now, in `dbusmenu.rs` — is reserved
+    /// for the secondary, right-click gesture; see [`Self::context_menu`]
+    /// for how that is kept from colliding with it.
     #[zbus(property)]
     async fn item_is_menu(&self) -> bool {
         false
@@ -154,6 +159,8 @@ impl ItemInterface {
         0
     }
 
+    /// Left-click, and this item's primary action: open the Settings
+    /// screen it is about.
     async fn activate(&self, _x: i32, _y: i32) {
         let screen = self.state.lock().await.activate_screen();
         if let Some(screen) = screen {
@@ -162,17 +169,34 @@ impl ItemInterface {
         }
     }
 
-    /// Middle-click. Same as a left-click here rather than nothing: an
-    /// item that responds to one button and silently ignores another
-    /// reads as broken.
+    /// Middle-click. No icon here defines a distinct secondary action —
+    /// there is nothing a radio or a toggle gains from the "less
+    /// important" activation the spec describes this as — so it runs
+    /// the same primary action as a left click rather than doing
+    /// nothing, which would read as a stuck button.
     async fn secondary_activate(&self, x: i32, y: i32) {
         self.activate(x, y).await;
     }
 
-    /// Right-click. Also opens the page, because there is no menu to show
-    /// yet; doing nothing would be indistinguishable from a hung daemon.
+    /// Right-click.
+    ///
+    /// A host that reads [`Self::menu`] shows that menu itself and calls
+    /// this only as a fallback for an item with no valid menu to show —
+    /// waybar's own tray module does exactly that, falling back to
+    /// `ContextMenu()` only when the dbusmenu it asked for came back
+    /// with no layout. So while a menu is being served, this does
+    /// nothing: the host is already showing it, and calling `activate()`
+    /// as well would open a Settings window on top of the menu the user
+    /// just asked to see — which used to be exactly what happened here,
+    /// back when this comment predated `dbusmenu.rs` and there was no
+    /// menu for any host to show. An item with no menu at all (plain
+    /// [`TrayIcon::register`], never reached by anything in this crate
+    /// today) still falls back to `activate()`, since doing nothing there
+    /// would be indistinguishable from a hung daemon.
     async fn context_menu(&self, x: i32, y: i32) {
-        self.activate(x, y).await;
+        if self.menu_path.is_none() {
+            self.activate(x, y).await;
+        }
     }
 
     async fn scroll(&self, _delta: i32, _orientation: String) {}

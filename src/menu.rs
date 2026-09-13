@@ -82,6 +82,51 @@ impl MenuItem {
             ..MenuItem::standard(label, "")
         }
     }
+
+    /// A checkmark that cannot be clicked — a radio blocked by a
+    /// hardware kill switch, say, where `on`/`off` is still true but no
+    /// D-Bus call flips it back. Shown rather than hidden, and shown as
+    /// a checkmark rather than an ordinary disabled row, so the state it
+    /// reports is not lost along with the ability to change it.
+    pub fn disabled_checkmark(label: impl Into<String>, on: bool) -> Self {
+        MenuItem {
+            kind: ItemKind::Checkmark,
+            toggle: Some(on),
+            ..MenuItem::disabled(label)
+        }
+    }
+}
+
+/// Builds a menu in the one shape every menu in this crate follows: a
+/// toggle row up top (or, in place of one, a single disabled row saying
+/// why there is nothing to toggle), then whatever content that toggle
+/// governs, then a settings row at the bottom.
+///
+/// The settings row is unconditional — offered in *every* state,
+/// unavailable included — because a menu with no way out of it is
+/// exactly the dead end CLAUDE.md's rules warn against; see
+/// `trayd.rs`'s module doc for where each of the four settings rows
+/// actually goes.
+///
+/// `content` may be empty (a keep-awake menu with nothing else holding
+/// an inhibit, a radio that is off or blocked). When it is, no separator
+/// is added for it — an empty section would otherwise put two
+/// separators in a row between the toggle and the settings row for
+/// nothing. `top` is a `Vec` rather than a single `MenuItem` only
+/// because the "nothing to toggle" case still has to supply *a* row —
+/// callers pass a one-element vec in the ordinary case.
+///
+/// This is what keeps a fifth icon from drifting from the other four:
+/// the shape lives here, once, rather than being re-derived per menu.
+pub fn radio_menu(top: Vec<MenuItem>, content: Vec<MenuItem>, settings: MenuItem) -> Menu {
+    let mut items = top;
+    if !content.is_empty() {
+        items.push(MenuItem::separator());
+        items.extend(content);
+    }
+    items.push(MenuItem::separator());
+    items.push(settings);
+    Menu::new(items)
 }
 
 /// A whole menu, with ids assigned.
@@ -230,5 +275,89 @@ mod tests {
                 _ => assert!(item.toggle.is_none(), "{} carries a toggle", item.label),
             }
         }
+    }
+
+    // --- radio_menu: the one shape every menu in the daemon follows ------
+
+    #[test]
+    fn a_disabled_checkmark_still_reports_its_state_but_cannot_be_clicked() {
+        let row = MenuItem::disabled_checkmark("Wi-Fi (blocked by hardware switch)", false);
+        assert_eq!(row.kind, ItemKind::Checkmark);
+        assert_eq!(row.toggle, Some(false));
+        assert!(!row.enabled);
+        assert!(row.action.is_none());
+    }
+
+    /// The ordinary shape: toggle, separator, content, separator,
+    /// settings — every icon that has something to show ends up here.
+    #[test]
+    fn radio_menu_with_content_is_toggle_then_content_then_settings_with_separators_between() {
+        let menu = radio_menu(
+            vec![MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off")],
+            vec![MenuItem::standard("home", "wifi:connect:home")],
+            MenuItem::standard("Wi-Fi settings…", "wifi:settings"),
+        );
+        let kinds: Vec<ItemKind> = menu.items.iter().map(|i| i.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ItemKind::Checkmark,
+                ItemKind::Separator,
+                ItemKind::Standard,
+                ItemKind::Separator,
+                ItemKind::Standard,
+            ]
+        );
+        assert_eq!(menu.items[0].label, "Wi-Fi");
+        assert_eq!(menu.items[2].label, "home");
+        assert_eq!(menu.items[4].label, "Wi-Fi settings…");
+    }
+
+    /// Empty content collapses to one separator, not two — a keep-awake
+    /// menu with no other inhibitor must not show a blank gap between
+    /// the toggle and the settings row.
+    #[test]
+    fn radio_menu_with_no_content_has_exactly_one_separator() {
+        let menu = radio_menu(
+            vec![MenuItem::checkmark("Keep awake", false, "keepawake:on")],
+            Vec::new(),
+            MenuItem::standard("Keep awake settings…", "keepawake:settings"),
+        );
+        let kinds: Vec<ItemKind> = menu.items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, vec![ItemKind::Checkmark, ItemKind::Separator, ItemKind::Standard]);
+    }
+
+    /// The unavailable shape: one disabled row explaining why, then the
+    /// settings row — never an empty popup, and never a dead end either.
+    #[test]
+    fn radio_menu_unavailable_still_offers_the_settings_row() {
+        let menu = radio_menu(
+            vec![MenuItem::disabled("Wi-Fi unavailable")],
+            Vec::new(),
+            MenuItem::standard("Wi-Fi settings…", "wifi:settings"),
+        );
+        assert!(!menu.items[0].enabled);
+        assert_eq!(menu.items.last().unwrap().label, "Wi-Fi settings…");
+        assert!(menu.items.last().unwrap().enabled);
+    }
+
+    /// Ids only ever move when a row's own meaning changes — never
+    /// merely because content between two states differs in length. A
+    /// settings row built at the end of a longer menu and a shorter one
+    /// still gets whatever id `Menu::new` assigns it in each case; what
+    /// this test actually pins is that adding a settings row through
+    /// `radio_menu` does not disturb the ids of the rows *before* it.
+    #[test]
+    fn rows_before_the_settings_row_keep_their_ids_whether_or_not_content_is_present() {
+        let toggle = || MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off");
+        let settings = || MenuItem::standard("Wi-Fi settings…", "wifi:settings");
+
+        let short = radio_menu(vec![toggle()], Vec::new(), settings());
+        let long = radio_menu(
+            vec![toggle()],
+            vec![MenuItem::standard("home", "wifi:connect:home")],
+            settings(),
+        );
+        assert_eq!(short.items[0].id, long.items[0].id, "the toggle is row 1 in both");
     }
 }

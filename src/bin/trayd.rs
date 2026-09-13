@@ -19,14 +19,25 @@
 //! Passive item, and dropping is the only thing that reliably releases
 //! the bus name a host is showing.
 //!
-//! # What keep awake and night light cannot do yet
+//! Every menu (`network_menu`, `bluetooth_menu`, `keep_awake_menu`,
+//! `night_light_menu`) is built through `hyprforge_tray::menu::radio_menu`,
+//! which is the one shape all four follow: a toggle (or, when there is
+//! nothing to toggle, a single disabled row saying why), the content that
+//! toggle governs, and a settings row — never omitted, unavailable states
+//! included. See `radio_menu`'s own doc for the reasoning.
 //!
-//! Neither has a Settings screen of its own: keep awake has no home in
-//! `hyprforge-settings` at all today, and night light's is a tab on the
-//! Desktop screen with no way to deep-link straight to it. Both are
-//! follow-ups outside this daemon's scope — see the task this module was
-//! built against — and are named here rather than silently worked around,
-//! per the vision's rule against a dead end with nothing said about it.
+//! # Where every menu's settings row goes
+//!
+//! All four now land somewhere real. `--screen network` and
+//! `--screen bluetooth` open those screens directly; `--screen idle` and
+//! `--screen night-light` deep-link to the `Idle` and `NightLight` tabs
+//! of the Desktop screen (`hyprforge-settings`'s `screen_from_cli`) —
+//! which is also what `TrayItem::activate_screen` already sends a left
+//! click on either icon to. Neither destination existed when this
+//! daemon's keep-awake and night-light icons were first added; both do
+//! now, so a settings row that used to have nowhere honest to send
+//! anyone finally does, and the two icons stop being the one pair of the
+//! four without a way out of their own menu.
 
 use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};
@@ -36,7 +47,7 @@ use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend,
 use hyprforge_network::{AccessPoint, NetworkManagerBackend, RadioState, Ssid};
 use hyprforge_network::Status as NetStatus;
 use hyprforge_power::{InhibitBackend, InhibitorInfo, LogindBackend, WhatSet};
-use hyprforge_tray::menu::{ItemKind, Menu, MenuItem};
+use hyprforge_tray::menu::{radio_menu, Menu, MenuItem};
 use hyprforge_tray::prefs::{self, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
 use hyprforge_tray::Status as TrayStatus;
@@ -973,41 +984,31 @@ fn network_menu(
     let settings_row = MenuItem::standard("Network settings…", "wifi:settings");
 
     let Some(status) = status.filter(|_| !unavailable) else {
-        return Menu::new(vec![
-            MenuItem::disabled("Wi-Fi unavailable"),
-            MenuItem::separator(),
-            settings_row,
-        ]);
+        return radio_menu(vec![MenuItem::disabled("Wi-Fi unavailable")], Vec::new(), settings_row);
     };
 
-    let mut items = Vec::new();
-    match status.radio {
+    let top = match status.radio {
         RadioState::Off => {
-            items.push(MenuItem::checkmark("Wi-Fi", false, "wifi:radio:on"));
-            items.push(MenuItem::separator());
-            items.push(settings_row);
-            return Menu::new(items);
+            return radio_menu(
+                vec![MenuItem::checkmark("Wi-Fi", false, "wifi:radio:on")],
+                Vec::new(),
+                settings_row,
+            );
         }
         // rfkill: no amount of D-Bus flips this back on, so the row is
         // shown but not offered as a toggle — the same call
         // `network_item` makes for the icon itself.
         RadioState::HardwareOff => {
-            items.push(MenuItem {
-                kind: ItemKind::Checkmark,
-                toggle: Some(false),
-                ..MenuItem::disabled("Wi-Fi (blocked by hardware switch)")
-            });
-            items.push(MenuItem::separator());
-            items.push(settings_row);
-            return Menu::new(items);
+            return radio_menu(
+                vec![MenuItem::disabled_checkmark("Wi-Fi (blocked by hardware switch)", false)],
+                Vec::new(),
+                settings_row,
+            );
         }
-        RadioState::On => {
-            items.push(MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off"));
-        }
-    }
+        RadioState::On => vec![MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off")],
+    };
 
-    items.push(MenuItem::separator());
-
+    let mut content = Vec::new();
     let displayed = net_for_display(access_points.to_vec());
     let total = displayed.len();
     for ap in displayed.into_iter().take(MAX_NETWORKS_SHOWN) {
@@ -1015,7 +1016,7 @@ fn network_menu(
         let label = ap.ssid.to_display_string();
 
         if ap.security.unsupported_reason().is_some() {
-            items.push(MenuItem::disabled(format!("{label} ({ENTERPRISE_ROW_REASON})")));
+            content.push(MenuItem::disabled(format!("{label} ({ENTERPRISE_ROW_REASON})")));
             continue;
         }
 
@@ -1029,21 +1030,19 @@ fn network_menu(
         };
 
         if is_connected {
-            items.push(MenuItem::checkmark(label, true, action));
+            content.push(MenuItem::checkmark(label, true, action));
         } else {
-            items.push(MenuItem::standard(label, action));
+            content.push(MenuItem::standard(label, action));
         }
     }
     if total > MAX_NETWORKS_SHOWN {
-        items.push(MenuItem::disabled(format!(
+        content.push(MenuItem::disabled(format!(
             "+{} more — see Settings",
             total - MAX_NETWORKS_SHOWN
         )));
     }
 
-    items.push(MenuItem::separator());
-    items.push(settings_row);
-    Menu::new(items)
+    radio_menu(top, content, settings_row)
 }
 
 /// What the Bluetooth menu should contain, from plain data — no D-Bus, no
@@ -1052,38 +1051,30 @@ fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Devic
     let settings_row = MenuItem::standard("Bluetooth settings…", "bt:settings");
 
     let Some(status) = status.filter(|_| !unavailable) else {
-        return Menu::new(vec![
-            MenuItem::disabled("Bluetooth unavailable"),
-            MenuItem::separator(),
-            settings_row,
-        ]);
+        return radio_menu(vec![MenuItem::disabled("Bluetooth unavailable")], Vec::new(), settings_row);
     };
 
-    let mut items = Vec::new();
-    match status.state {
+    let top = match status.state {
         AdapterState::Off => {
-            items.push(MenuItem::checkmark("Bluetooth", false, "bt:radio:on"));
-            items.push(MenuItem::separator());
-            items.push(settings_row);
-            return Menu::new(items);
+            return radio_menu(
+                vec![MenuItem::checkmark("Bluetooth", false, "bt:radio:on")],
+                Vec::new(),
+                settings_row,
+            );
         }
         AdapterState::HardwareBlocked => {
-            items.push(MenuItem {
-                kind: ItemKind::Checkmark,
-                toggle: Some(false),
-                ..MenuItem::disabled("Bluetooth (blocked by hardware switch)")
-            });
-            items.push(MenuItem::separator());
-            items.push(settings_row);
-            return Menu::new(items);
+            return radio_menu(
+                vec![MenuItem::disabled_checkmark("Bluetooth (blocked by hardware switch)", false)],
+                Vec::new(),
+                settings_row,
+            );
         }
         AdapterState::On | AdapterState::Changing => {
-            items.push(MenuItem::checkmark("Bluetooth", true, "bt:radio:off"));
+            vec![MenuItem::checkmark("Bluetooth", true, "bt:radio:off")]
         }
-    }
+    };
 
-    items.push(MenuItem::separator());
-
+    let mut content = Vec::new();
     for device in bt_for_display(devices.to_vec()) {
         if !device.paired {
             // A menu has nowhere to show six digits and ask whether they
@@ -1091,7 +1082,7 @@ fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Devic
             // same call as a Wi-Fi network whose passphrase we do not
             // have. It used to say "pairing not supported yet", which
             // stopped being true the moment the agent landed.
-            items.push(MenuItem::standard(
+            content.push(MenuItem::standard(
                 format!("{} — pair in Settings", device.alias),
                 "bt:settings",
             ));
@@ -1105,15 +1096,13 @@ fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Devic
         };
 
         if device.connected {
-            items.push(MenuItem::checkmark(device.alias.clone(), true, action));
+            content.push(MenuItem::checkmark(device.alias.clone(), true, action));
         } else {
-            items.push(MenuItem::standard(device.alias.clone(), action));
+            content.push(MenuItem::standard(device.alias.clone(), action));
         }
     }
 
-    items.push(MenuItem::separator());
-    items.push(settings_row);
-    Menu::new(items)
+    radio_menu(top, content, settings_row)
 }
 
 /// The id `hyprctl`/logind knows this daemon's own inhibit by. Used both
@@ -1221,31 +1210,33 @@ fn keep_awake_item(held: Option<bool>, others: &[InhibitorInfo], unavailable: bo
 /// "why won't this machine sleep" from the tray, not offering to end
 /// them.
 fn keep_awake_menu(held: Option<bool>, others: &[InhibitorInfo], unavailable: bool) -> Menu {
+    let settings_row = MenuItem::standard("Keep awake settings…", "keepawake:settings");
+
     let Some(held) = held.filter(|_| !unavailable) else {
-        return Menu::new(vec![MenuItem::disabled("Keep awake unavailable")]);
+        return radio_menu(vec![MenuItem::disabled("Keep awake unavailable")], Vec::new(), settings_row);
     };
 
-    let mut items = vec![MenuItem::checkmark(
-        "Keep this machine awake",
+    let toggle = MenuItem::checkmark(
+        "Keep awake",
         held,
         if held { "keepawake:off" } else { "keepawake:on" },
-    )];
+    );
 
+    let mut content = Vec::new();
     if !others.is_empty() {
-        items.push(MenuItem::separator());
-        items.push(MenuItem::disabled("Also preventing sleep:"));
+        content.push(MenuItem::disabled("Also preventing sleep:"));
         for other in others.iter().take(MAX_OTHER_INHIBITORS_SHOWN) {
-            items.push(MenuItem::disabled(format!("{} — {}", other.who, other.why)));
+            content.push(MenuItem::disabled(format!("{} — {}", other.who, other.why)));
         }
         if others.len() > MAX_OTHER_INHIBITORS_SHOWN {
-            items.push(MenuItem::disabled(format!(
+            content.push(MenuItem::disabled(format!(
                 "+{} more",
                 others.len() - MAX_OTHER_INHIBITORS_SHOWN
             )));
         }
     }
 
-    Menu::new(items)
+    radio_menu(vec![toggle], content, settings_row)
 }
 
 /// The warm presets offered as menu rows — the one thing a tray menu can
@@ -1314,14 +1305,29 @@ fn night_light_item(state: &NightLightState) -> TrayItem {
 /// unavailable rows say which of the two distinct reasons applies rather
 /// than sharing one "can't do anything" row.
 fn night_light_menu(state: &NightLightState) -> Menu {
+    let settings_row = MenuItem::standard("Night light settings…", "nightlight:settings");
+
     let (temperature, on) = match *state {
+        // Names the feature, like the other three unavailable rows, but
+        // keeps the detail that makes this one actionable: hyprsunset not
+        // running is expected until something starts it, not a bug.
         NightLightState::NotRunning => {
-            return Menu::new(vec![MenuItem::disabled(
-                "hyprsunset isn't running — starts from exec-once",
-            )])
+            return radio_menu(
+                vec![MenuItem::disabled("Night light unavailable — hyprsunset isn't running")],
+                Vec::new(),
+                settings_row,
+            );
         }
+        // Distinct from `NotRunning`: this is the check itself failing,
+        // not evidence that hyprsunset is absent — see `NightLightState`'s
+        // own doc. Collapsing the two into one row would lose exactly the
+        // distinction CLAUDE.md calls out.
         NightLightState::CouldNotCheck => {
-            return Menu::new(vec![MenuItem::disabled("Couldn't check hyprsunset")])
+            return radio_menu(
+                vec![MenuItem::disabled("Night light status unknown")],
+                Vec::new(),
+                settings_row,
+            );
         }
         NightLightState::Known { temperature, on } => (temperature, on),
     };
@@ -1331,20 +1337,20 @@ fn night_light_menu(state: &NightLightState) -> Menu {
     } else {
         format!("nightlight:set:{}", NIGHT_LIGHT_PRESETS[0])
     };
-    let mut items = vec![MenuItem::checkmark("Night light", on, toggle_action)];
+    let toggle = MenuItem::checkmark("Night light", on, toggle_action);
 
-    items.push(MenuItem::separator());
+    let mut content = Vec::new();
     for &kelvin in NIGHT_LIGHT_PRESETS {
         let is_current = on && temperature == kelvin;
         let action = format!("nightlight:set:{kelvin}");
         if is_current {
-            items.push(MenuItem::checkmark(format!("{kelvin}K"), true, action));
+            content.push(MenuItem::checkmark(format!("{kelvin}K"), true, action));
         } else {
-            items.push(MenuItem::standard(format!("{kelvin}K"), action));
+            content.push(MenuItem::standard(format!("{kelvin}K"), action));
         }
     }
 
-    Menu::new(items)
+    radio_menu(vec![toggle], content, settings_row)
 }
 
 /// The typed operation behind an action string a menu click sends back.
@@ -1383,7 +1389,9 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
         "bt:radio:off" => Some(MenuAction::BtRadio(false)),
         "keepawake:on" => Some(MenuAction::KeepAwake(true)),
         "keepawake:off" => Some(MenuAction::KeepAwake(false)),
+        "keepawake:settings" => Some(MenuAction::OpenSettings("idle")),
         "nightlight:off" => Some(MenuAction::NightLightOff),
+        "nightlight:settings" => Some(MenuAction::OpenSettings("night-light")),
         _ => {
             if let Some(hex) = action.strip_prefix("wifi:connect:") {
                 hex_decode(hex).map(MenuAction::WifiConnect)
@@ -1589,6 +1597,7 @@ async fn perform_menu_action(
 mod tests {
     use super::*;
     use hyprforge_bluetooth::DeviceKind;
+    use hyprforge_tray::menu::ItemKind;
 
     // The exact freedesktop names this daemon is allowed to hand to a
     // tray host. Not every name the doc comment lists has to appear here
@@ -2547,5 +2556,99 @@ mod tests {
         assert_eq!(parse_menu_action("nightlight:off"), Some(MenuAction::NightLightOff));
         assert_eq!(parse_menu_action("nightlight:set:2700"), Some(MenuAction::NightLightSet(2700)));
         assert_eq!(parse_menu_action("nightlight:set:not-a-number"), None);
+    }
+
+    // --- the one menu shape, applied to all four ---------------------------
+
+    /// Every menu ends in a settings row, unavailable states included —
+    /// the property this whole task was about. Before this, keep-awake
+    /// and night-light's unavailable menus offered nothing at all: a
+    /// dead end with no way out, the exact thing CLAUDE.md warns against.
+    #[test]
+    fn every_menus_unavailable_state_still_offers_its_settings_row() {
+        let menus = [
+            network_menu(None, None, true, &[], &[]),
+            bluetooth_menu(None, true, &[]),
+            keep_awake_menu(None, &[], true),
+            night_light_menu(&NightLightState::NotRunning),
+            night_light_menu(&NightLightState::CouldNotCheck),
+        ];
+        for menu in menus {
+            let last = menu.items.last().expect("a menu with no rows at all");
+            assert!(last.enabled, "the settings row must still be clickable: {}", last.label);
+            assert!(
+                last.label.to_lowercase().contains("settings"),
+                "the last row of an unavailable menu must be its settings row, got {:?}",
+                last.label
+            );
+        }
+    }
+
+    /// All four menus end with a settings row in their ordinary
+    /// (available) state too, not only when something is wrong — that
+    /// symmetry is the actual complaint this task set out to fix.
+    #[test]
+    fn every_menus_ordinary_state_ends_with_its_own_settings_row() {
+        let net = network_menu(Some(&net_status(RadioState::On, None)), None, false, &[], &[]);
+        assert_eq!(net.items.last().unwrap().label, "Network settings…");
+
+        let bt = bluetooth_menu(Some(&bt_status(AdapterState::On)), false, &[]);
+        assert_eq!(bt.items.last().unwrap().label, "Bluetooth settings…");
+
+        let ka = keep_awake_menu(Some(false), &[], false);
+        assert_eq!(ka.items.last().unwrap().label, "Keep awake settings…");
+
+        let nl = night_light_menu(&NightLightState::Known { temperature: 4500, on: true });
+        assert_eq!(nl.items.last().unwrap().label, "Night light settings…");
+    }
+
+    /// The settings rows for keep awake and night light are new: neither
+    /// menu offered one before this task, because neither destination
+    /// existed. Both do now (`--screen idle`, `--screen night-light`),
+    /// which is also what a left click on either icon already opens —
+    /// see `TrayItem::activate_screen`. This pins the two rows to those
+    /// same names, so the menu and the icon can never disagree about
+    /// where they send someone.
+    #[test]
+    fn the_new_settings_rows_open_the_same_screens_a_left_click_on_that_icon_does() {
+        let ka = keep_awake_menu(Some(false), &[], false);
+        let ka_row = ka.items.last().unwrap();
+        assert_eq!(
+            parse_menu_action(ka_row.action.as_deref().unwrap()),
+            Some(MenuAction::OpenSettings("idle"))
+        );
+
+        let nl = night_light_menu(&NightLightState::Known { temperature: 4500, on: true });
+        let nl_row = nl.items.last().unwrap();
+        assert_eq!(
+            parse_menu_action(nl_row.action.as_deref().unwrap()),
+            Some(MenuAction::OpenSettings("night-light"))
+        );
+    }
+
+    /// Toggle labels are all nouns now — "Keep awake" replaces "Keep this
+    /// machine awake", to match "Wi-Fi", "Bluetooth" and "Night light".
+    #[test]
+    fn the_keep_awake_toggles_label_is_a_noun_like_the_other_three() {
+        let menu = keep_awake_menu(Some(true), &[], false);
+        let toggle = menu.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
+        assert_eq!(toggle.label, "Keep awake");
+    }
+
+    /// A row's id must not move depending on how much content comes
+    /// between the toggle and the settings row — the whole reason
+    /// `menu.rs` documents `id` as assigned from meaning, not position.
+    /// Here: the keep-awake toggle is always row 1, whether or not any
+    /// other process is holding an inhibitor.
+    #[test]
+    fn the_keep_awake_toggles_id_does_not_move_when_other_inhibitors_appear() {
+        let alone = keep_awake_menu(Some(true), &[], false);
+        let others = [inhibitor("mpv", "playing a video")];
+        let with_others = keep_awake_menu(Some(true), &others, false);
+
+        let alone_toggle = alone.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
+        let with_others_toggle =
+            with_others.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
+        assert_eq!(alone_toggle.id, with_others_toggle.id);
     }
 }

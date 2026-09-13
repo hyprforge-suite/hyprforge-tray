@@ -169,7 +169,17 @@ async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
 
     let connection = zbus::Connection::session().await.expect("a session bus");
 
-    let menu_path: zbus::zvariant::OwnedObjectPath = connection
+    // Not "Menu answers `/`" — **there must be no `Menu` property at
+    // all**, and the difference is the whole bug this test was rewritten
+    // for. Answering `/` looked like the spec's way of saying "no menu";
+    // waybar instead saw a property, built a dbusmenu client against the
+    // path it named, got nothing, drew an empty four-pixel GTK menu at
+    // the pointer, and — believing it had served the click — never
+    // called `ContextMenu`, so `hyprforge-traymenu` never opened.
+    //
+    // Reading a property that is not declared is an error, and that
+    // error is the assertion.
+    let reply = connection
         .call_method(
             Some(icon.bus_name()),
             "/StatusNotifierItem",
@@ -177,17 +187,12 @@ async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
             "Get",
             &("org.kde.StatusNotifierItem", "Menu"),
         )
-        .await
-        .expect("the Menu property is readable")
-        .body()
-        .deserialize::<zbus::zvariant::Value>()
-        .map(|v| zbus::zvariant::OwnedObjectPath::try_from(v).expect("Menu is an object path"))
-        .expect("the Menu property deserializes");
-    assert_eq!(
-        menu_path.as_str(),
-        "/",
-        "an item with a menu must still advertise none over D-Bus — otherwise a \
-         spec-compliant host draws its own menu alongside hyprforge-traymenu's"
+        .await;
+    assert!(
+        reply.is_err(),
+        "the item must declare no Menu property at all — a host that sees one builds \
+         its own menu from it and never calls ContextMenu, which is where \
+         hyprforge-traymenu is launched"
     );
 
     // And nothing answers `com.canonical.dbusmenu` at the old path either

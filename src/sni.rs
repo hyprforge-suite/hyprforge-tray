@@ -140,26 +140,27 @@ impl ItemInterface {
         )
     }
 
-    /// Always `/` — "no menu", the spec's own way of saying so, since an
-    /// object path cannot itself be null.
-    ///
-    /// This used to be a real path, served by this crate's own
-    /// `com.canonical.dbusmenu` object, whenever `self.menu` was `Some`.
-    /// It no longer is, for any item: advertising that path is exactly
-    /// what would make a spec-compliant bar draw its *own* menu from it —
-    /// waybar's own tray module does precisely that whenever `Menu` names
-    /// a path — which is the one thing this had to stop doing once
-    /// `hyprforge-traymenu` existed to draw the same menu itself. A host
-    /// that sees `/` here never asks for a layout at all and falls
-    /// straight to [`Self::context_menu`], which is exactly the gap this
-    /// crate's own popup now fills. See this crate's own module doc for
-    /// the cost that narrowing carries.
-    #[zbus(property)]
-    async fn menu(&self) -> zbus::zvariant::OwnedObjectPath {
-        zbus::zvariant::ObjectPath::try_from("/".to_string())
-            .expect("'/' is always a valid object path")
-            .into()
-    }
+    // There is deliberately **no `Menu` property on this interface at
+    // all**, and that is not the same as answering `/`.
+    //
+    // `/` was the first attempt, on the reading that an object path
+    // cannot be null so the root path must mean "nothing here". A bar
+    // does not read it that way. waybar sees the property exists, builds
+    // a `com.canonical.dbusmenu` client against whatever path it names,
+    // gets no layout back from `/`, and draws an **empty GTK menu** — a
+    // four-pixel line at the pointer — and, believing it has handled the
+    // click itself, never calls `ContextMenu` at all. So the popup this
+    // crate exists to show never opened.
+    //
+    // Omitting the property entirely is what leaves a host with nothing
+    // to build from and sends it to `context_menu`, which is where
+    // `hyprforge-traymenu` gets launched. The property is optional in
+    // the StatusNotifierItem spec precisely so an item can say it has no
+    // menu of its own.
+    //
+    // This one is only settleable against a real bar: every version of
+    // it type-checks, and the difference between them is what somebody
+    // else's code does with the answer.
 
     /// Zero: these items have no window of their own. A host uses this
     /// only to associate an item with an X11 window, which is meaningless
@@ -507,20 +508,16 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn the_menu_property_is_always_the_root_path_even_with_a_menu_recorded() {
-        let with_menu = interface(Some(crate::menu::Menu::new(vec![crate::menu::MenuItem::standard(
-            "home",
-            "connect:home",
-        )])));
-        assert_eq!(with_menu.menu().await.as_str(), "/");
-    }
-
-    #[tokio::test]
-    async fn the_menu_property_is_the_root_path_with_no_menu_at_all() {
-        let without_menu = interface(None);
-        assert_eq!(without_menu.menu().await.as_str(), "/");
-    }
+    // The two tests that used to sit here asserted `menu()` answered
+    // `/`. There is no `menu()` any more — see the comment where the
+    // property used to be declared — and its absence is enforced by the
+    // compiler rather than by a test.
+    //
+    // What a *host* makes of that absence is the part worth checking,
+    // and it is not checkable here: it needs a real bar on a real bus.
+    // `tests/live_tray.rs` asserts the introspected interface carries no
+    // `Menu` property at all, which is the claim this crate makes about
+    // somebody else's code.
 
     /// `item_is_menu` must stay `false` regardless of whether a menu is
     /// recorded — this item's own primary action is still what a left

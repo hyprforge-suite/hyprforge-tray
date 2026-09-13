@@ -17,11 +17,19 @@
 //! grows two more fields.
 //!
 //! `menu_y_offset` is unrelated to which icons show: it is how far below
-//! the click `hyprforge-traymenu` opens (`ItemInterface::context_menu`,
-//! in `sni.rs`) — the popup has no way to ask Hyprland how tall the bar
-//! it was clicked from is, so this is the user's own answer to that,
-//! read fresh on every right click the same way every other field here
-//! is re-read on every poll tick.
+//! the bar's own reserved area `hyprforge-traymenu` opens the popup (see
+//! `hyprforge_popup::place_below_bar`) — `hyprctl monitors -j`'s own
+//! `reserved` array says how tall the *exclusive zone* is, but a bar can
+//! reserve less than it visually occupies (padding, a border), so this
+//! is the user's own answer to the rest of that gap. Read by
+//! `hyprforge-traymenu` itself, fresh on every right click, the same way
+//! every other field here is re-read on every poll tick — not by
+//! `hyprforge-trayd`, even though this file lives in that daemon's own
+//! crate: `ItemInterface::context_menu` (`sni.rs`) used to add this to
+//! the click's own Y before spawning the popup, which made the popup's
+//! position depend on where on the icon the click landed. Anchoring to
+//! the bar instead of the pointer meant moving the read to whichever
+//! process actually places the popup.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

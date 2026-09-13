@@ -62,10 +62,13 @@ pub enum LaunchOutcome {
     Failed,
 }
 
-/// Hands `menu` to `hyprforge-traymenu`, positioned at `(x, y)` (already
-/// including whatever `Prefs::menu_y_offset` the caller wanted applied —
-/// this function knows nothing about `tray.toml`), and forwards whatever
-/// action it printed back to `events`.
+/// Hands `menu` to `hyprforge-traymenu`, at the icon's own `(x, y)` —
+/// unmodified from whatever the host handed `ItemInterface::context_menu`,
+/// since this function knows nothing about `tray.toml` and no longer
+/// applies `Prefs::menu_y_offset` itself (the popup reads that, and
+/// anchors its own Y to the bar's reserved area — see
+/// `hyprforge_popup::place_below_bar`) — and forwards whatever action it
+/// printed back to `events`.
 ///
 /// `id` is only ever used for the [`OPENED_PREFIX`] event, sent before
 /// anything is spawned — the same point in the sequence the old

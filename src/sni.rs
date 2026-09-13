@@ -221,26 +221,22 @@ impl ItemInterface {
         };
 
         let id = self.state.lock().await.id.clone();
-        // Never collapsed with "menu_y_offset is unreadable" turning into
-        // silence — an unreadable `tray.toml` is already warned about by
-        // `hyprforge-trayd`'s own poll loop every time it changes; this
-        // is just the one place that also needs a number out of it right
-        // now, and the default is the least surprising thing to use
-        // rather than refusing to open the menu at all.
-        let offset = match crate::prefs::load() {
-            Ok(prefs) => prefs.menu_y_offset,
-            Err(e) => {
-                tracing::warn!(error = %e, "could not read tray.toml for the menu's Y offset; using the default");
-                crate::prefs::Prefs::default().menu_y_offset
-            }
-        };
-
+        // `x`/`y` are forwarded exactly as the host handed them — no
+        // `menu_y_offset` added here any more. Adding it to a click's own
+        // Y is what made the popup's vertical position depend on where
+        // on the icon the user happened to click, which is the bug this
+        // crate exists not to have: `hyprforge-traymenu` anchors the
+        // popup to the bar's own reserved area instead (reading the
+        // offset itself, from the same `tray.toml`), so this daemon's
+        // only remaining job is telling it which icon was clicked and on
+        // which monitor — see `hyprforge_popup::place_below_bar`'s own
+        // doc for the whole mechanism.
         let state = self.state.clone();
         let clicks = self.clicks.clone();
         tokio::spawn(async move {
             let snapshot = menu.lock().await.clone();
             if let crate::launch::LaunchOutcome::NotInstalled =
-                crate::launch::show(&id, &snapshot, x, y.saturating_add(offset), &events).await
+                crate::launch::show(&id, &snapshot, x, y, &events).await
             {
                 let screen = state.lock().await.activate_screen();
                 if let Some(screen) = screen {

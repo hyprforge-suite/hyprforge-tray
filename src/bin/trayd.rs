@@ -61,7 +61,7 @@ use tokio::sync::Mutex;
 /// `reannounce_loop`, which only ever reads it to call `announce` again.
 type IconSlot = Arc<Mutex<Option<Arc<TrayIcon>>>>;
 
-/// One managed icon's registration slot, together with the dbusmenu
+/// One managed icon's registration slot, together with the tray-icon
 /// index it was registered under.
 ///
 /// `poll_loop`, `reannounce_loop` and `main` used to thread
@@ -1419,10 +1419,11 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
 
 /// Receives menu clicks and carries out the operation behind each one.
 ///
-/// Runs on its own task, never on the D-Bus dispatch path — `dbusmenu.rs`
-/// already hands `event`/`event_group` an unbounded sender and returns,
-/// which is what makes that safe to do here: a slow or hanging backend
-/// call blocks this loop, not the host waiting on the D-Bus method call.
+/// Runs on its own task, never on the D-Bus dispatch path — `sni.rs`'s
+/// `context_menu` already spawns `hyprforge_tray::launch::show` onto its
+/// own task and returns, which is what makes that safe to do here: a slow
+/// or hanging backend call blocks this loop, not the host waiting on the
+/// D-Bus method call that triggered the click in the first place.
 /// Keeps its own [`Reconnecting`] state, independent of `poll_loop`'s —
 /// a second connection to NetworkManager or BlueZ is unremarkable, and
 /// sharing one would need a lock held across every backend call this loop
@@ -1476,7 +1477,7 @@ async fn handle_menu_clicks(
     while let Some(action) = actions.recv().await {
         // A menu being opened is an event, not a click, and only the
         // Wi-Fi one wants anything done about it.
-        if let Some(id) = action.strip_prefix(hyprforge_tray::dbusmenu::OPENED_PREFIX) {
+        if let Some(id) = action.strip_prefix(hyprforge_tray::OPENED_PREFIX) {
             if id == NETWORK_ITEM_ID {
                 scan_then_refresh(&mut net_state, refresh.clone()).await;
             }
@@ -1974,7 +1975,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32 };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -1993,12 +1994,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32 };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32 },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");
@@ -2229,11 +2230,11 @@ mod tests {
     fn a_menu_open_is_not_mistaken_for_a_click() {
         let opened = format!(
             "{}{}",
-            hyprforge_tray::dbusmenu::OPENED_PREFIX,
+            hyprforge_tray::OPENED_PREFIX,
             NETWORK_ITEM_ID
         );
         assert!(
-            opened.strip_prefix(hyprforge_tray::dbusmenu::OPENED_PREFIX).is_some(),
+            opened.strip_prefix(hyprforge_tray::OPENED_PREFIX).is_some(),
             "the open event must be recognisable by its prefix"
         );
         assert!(

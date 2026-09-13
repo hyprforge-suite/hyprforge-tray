@@ -22,18 +22,6 @@ use hyprforge_tray::{TrayIcon, TrayItem};
 /// rather than returning early and printing `ok` like one that passed.
 const SKIP_MARKER: &str = "HYPRFORGE-SKIP:";
 
-/// `GetLayout`'s reply, spelled out: `(u(ia{sv}av))` — a revision, then a
-/// node of `(id, properties, children)` whose children are variants
-/// wrapping more nodes of the same shape.
-type LayoutReply = (
-    u32,
-    (
-        i32,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-        Vec<zbus::zvariant::OwnedValue>,
-    ),
-);
-
 fn item(id: &str) -> TrayItem {
     TrayItem {
         id: id.to_string(),
@@ -130,16 +118,27 @@ async fn an_update_reaches_the_host_and_an_unchanged_one_is_cheap() {
     icon.update(changed).await.expect("a changed update emits and succeeds");
 }
 
-/// The menu, over the wire.
+/// The menu, over the wire — or rather, the deliberate absence of one.
 ///
-/// `GetLayout` returns `(u(ia{sv}av))` — a recursive structure whose
-/// children are variants wrapping more of the same. A wrong signature
-/// does not fail anywhere: the host reads a menu with no rows and shows
-/// an empty popup, with nothing logged at either end. The only way to
-/// know is to put it on a real bus and read it back.
+/// `hyprforge-tray` used to serve `com.canonical.dbusmenu` at
+/// `/StatusNotifierItem/Menu` for any item registered with a menu, and a
+/// wrong `GetLayout` signature there was invisible: the host would read a
+/// menu with no rows and show an empty popup, with nothing logged at
+/// either end — which is why this test used to put one on a real bus and
+/// read it back. It no longer does either of those things: this crate
+/// stopped serving that protocol so that only `hyprforge-traymenu` draws
+/// the menu (see `src/lib.rs`'s own module doc for the cost). What this
+/// test can still uniquely prove, against a real host rather than this
+/// crate's own idea of the protocol, is the property that change depends
+/// on: an item registered *with* a menu advertises exactly the same "no
+/// menu" (`/`) that one registered with none does. If that property ever
+/// regresses — the `Menu` property starts naming a real path again — a
+/// spec-compliant bar goes straight back to drawing its own menu
+/// alongside `hyprforge-traymenu`'s, which is the exact bug this whole
+/// architecture exists to avoid.
 #[tokio::test]
 #[ignore]
-async fn a_menu_survives_the_round_trip_through_d_bus() {
+async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
     use hyprforge_tray::menu::{Menu, MenuItem};
 
     let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -170,7 +169,6 @@ async fn a_menu_survives_the_round_trip_through_d_bus() {
 
     let connection = zbus::Connection::session().await.expect("a session bus");
 
-    // The item must advertise where its menu lives, or no host ever asks.
     let menu_path: zbus::zvariant::OwnedObjectPath = connection
         .call_method(
             Some(icon.bus_name()),
@@ -183,52 +181,30 @@ async fn a_menu_survives_the_round_trip_through_d_bus() {
         .expect("the Menu property is readable")
         .body()
         .deserialize::<zbus::zvariant::Value>()
-        .map(|v| {
-            zbus::zvariant::OwnedObjectPath::try_from(v).expect("Menu is an object path")
-        })
+        .map(|v| zbus::zvariant::OwnedObjectPath::try_from(v).expect("Menu is an object path"))
         .expect("the Menu property deserializes");
-    assert_eq!(menu_path.as_str(), "/StatusNotifierItem/Menu");
+    assert_eq!(
+        menu_path.as_str(),
+        "/",
+        "an item with a menu must still advertise none over D-Bus — otherwise a \
+         spec-compliant host draws its own menu alongside hyprforge-traymenu's"
+    );
 
-    // And the layout must actually deserialize into the shape the
-    // protocol specifies, with our rows in it.
+    // And nothing answers `com.canonical.dbusmenu` at the old path either
+    // — a host that ignored `Menu` and asked anyway (unlikely, but the
+    // whole point of a live test is not assuming) must find nothing
+    // there, not a stale object this crate forgot to stop serving.
     let reply = connection
         .call_method(
             Some(icon.bus_name()),
-            menu_path.as_str(),
+            "/StatusNotifierItem/Menu",
             Some("com.canonical.dbusmenu"),
             "GetLayout",
             &(0i32, -1i32, Vec::<String>::new()),
         )
-        .await
-        .expect("GetLayout answers");
-
-    let (revision, root): LayoutReply = reply.body().deserialize().expect(
-        "the layout deserializes as (u(ia{sv}av)) — if this fails the signature is wrong \
-         and every host would show an empty menu",
-    );
-
-    assert!(revision >= 1, "a host ignores a layout it has already seen");
-    assert_eq!(root.0, 0, "the root is id 0");
-    assert_eq!(root.2.len(), 4, "four rows went in; got {}", root.2.len());
-
-    // And the rows carry their labels, which is what the user reads.
-    let labels: Vec<String> = root
-        .2
-        .iter()
-        .filter_map(|child| {
-            let value = zbus::zvariant::Value::from(child.clone());
-            let zbus::zvariant::Value::Structure(s) = value else {
-                return None;
-            };
-            let props: std::collections::HashMap<String, zbus::zvariant::OwnedValue> =
-                std::collections::HashMap::try_from(s.fields()[1].try_clone().ok()?).ok()?;
-            props
-                .get("label")
-                .and_then(|v| String::try_from(v.clone()).ok())
-        })
-        .collect();
+        .await;
     assert!(
-        labels.iter().any(|l| l == "home"),
-        "the rows lost their labels on the wire; got {labels:?}"
+        reply.is_err(),
+        "com.canonical.dbusmenu must not be served at all any more; got {reply:?}"
     );
 }

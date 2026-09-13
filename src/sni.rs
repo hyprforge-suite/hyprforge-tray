@@ -12,10 +12,6 @@ use zbus::Connection;
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const ITEM_PATH: &str = "/StatusNotifierItem";
-/// The menu hangs off the item's own path. Any path on the same
-/// connection would do; keeping it under the item's makes the pairing
-/// obvious in `busctl tree`.
-pub const MENU_PATH: &str = "/StatusNotifierItem/Menu";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrayError {
@@ -67,15 +63,21 @@ trait StatusNotifierWatcher {
 /// The object a host reads. One per icon.
 struct ItemInterface {
     state: Arc<Mutex<TrayItem>>,
-    /// `None` until this item has a menu. The property answers `/` then,
-    /// which is how the spec spells "no menu" — an object path is not
-    /// nullable, so there is no other way to say it.
-    menu_path: Option<String>,
+    /// `None` for an item registered with no menu at all (plain
+    /// [`TrayIcon::register`], never reached by anything in this crate
+    /// today). `Some` is never advertised to a host any more — see
+    /// [`Self::menu`] — it exists only so [`Self::context_menu`] has
+    /// something to hand `hyprforge-traymenu`.
+    menu: Option<Arc<Mutex<crate::menu::Menu>>>,
     /// Left-clicks, as the Settings screen name to open. Unbounded
     /// because a click must never block the D-Bus handler it arrives on:
     /// the host is waiting for the method to return, and spawning the
     /// process inline would make the bar stutter.
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Where a menu click's action string lands — see
+    /// [`Self::context_menu`]. `None` alongside `menu: None`; always
+    /// `Some` when `menu` is.
+    menu_clicks: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
@@ -118,9 +120,9 @@ impl ItemInterface {
     /// item *only* supports the context menu — not the case here, since
     /// every icon has a primary action (open the Settings screen it is
     /// about) that a left click should reach directly, menu or no menu.
-    /// The menu — which does exist now, in `dbusmenu.rs` — is reserved
-    /// for the secondary, right-click gesture; see [`Self::context_menu`]
-    /// for how that is kept from colliding with it.
+    /// The menu is reserved for the secondary, right-click gesture; see
+    /// [`Self::context_menu`] for how it is shown now that this crate no
+    /// longer serves `com.canonical.dbusmenu` for a host to draw itself.
     #[zbus(property)]
     async fn item_is_menu(&self) -> bool {
         false
@@ -138,16 +140,24 @@ impl ItemInterface {
         )
     }
 
-    /// Where the right-click menu lives, or `/` for none.
+    /// Always `/` — "no menu", the spec's own way of saying so, since an
+    /// object path cannot itself be null.
     ///
-    /// A host reads this once when the item registers. Advertising a path
-    /// that serves nothing gives the user a menu that opens empty, so
-    /// this stays `None` unless a menu was actually served.
+    /// This used to be a real path, served by this crate's own
+    /// `com.canonical.dbusmenu` object, whenever `self.menu` was `Some`.
+    /// It no longer is, for any item: advertising that path is exactly
+    /// what would make a spec-compliant bar draw its *own* menu from it —
+    /// waybar's own tray module does precisely that whenever `Menu` names
+    /// a path — which is the one thing this had to stop doing once
+    /// `hyprforge-traymenu` existed to draw the same menu itself. A host
+    /// that sees `/` here never asks for a layout at all and falls
+    /// straight to [`Self::context_menu`], which is exactly the gap this
+    /// crate's own popup now fills. See this crate's own module doc for
+    /// the cost that narrowing carries.
     #[zbus(property)]
     async fn menu(&self) -> zbus::zvariant::OwnedObjectPath {
-        let path = self.menu_path.as_deref().unwrap_or("/");
-        zbus::zvariant::ObjectPath::try_from(path.to_string())
-            .expect("both branches are valid object paths")
+        zbus::zvariant::ObjectPath::try_from("/".to_string())
+            .expect("'/' is always a valid object path")
             .into()
     }
 
@@ -180,23 +190,63 @@ impl ItemInterface {
 
     /// Right-click.
     ///
-    /// A host that reads [`Self::menu`] shows that menu itself and calls
-    /// this only as a fallback for an item with no valid menu to show —
-    /// waybar's own tray module does exactly that, falling back to
-    /// `ContextMenu()` only when the dbusmenu it asked for came back
-    /// with no layout. So while a menu is being served, this does
-    /// nothing: the host is already showing it, and calling `activate()`
-    /// as well would open a Settings window on top of the menu the user
-    /// just asked to see — which used to be exactly what happened here,
-    /// back when this comment predated `dbusmenu.rs` and there was no
-    /// menu for any host to show. An item with no menu at all (plain
-    /// [`TrayIcon::register`], never reached by anything in this crate
-    /// today) still falls back to `activate()`, since doing nothing there
-    /// would be indistinguishable from a hung daemon.
+    /// [`Self::menu`] always answers `/` now, so a host never draws a
+    /// menu of its own for this call to be a fallback from — this *is*
+    /// the menu, for every host. What used to be waybar's own
+    /// `com.canonical.dbusmenu` fallback path (calling this only when the
+    /// dbusmenu it asked for came back with no layout) is now the only
+    /// path: this spawns `hyprforge-traymenu`, hands it the menu this
+    /// daemon already built, and forwards whatever it prints back to
+    /// `hyprforge-trayd`'s own action pipeline — see
+    /// `crate::launch::show`'s doc for the whole sequence, and this
+    /// crate's own module doc for why a host can no longer draw this
+    /// itself.
+    ///
+    /// Spawned onto its own task rather than awaited here: the host is
+    /// blocked on this D-Bus method returning, and the popup can stay
+    /// open for as long as the user is looking at it. An item with no
+    /// menu at all (plain [`TrayIcon::register`], never reached by
+    /// anything in this crate today) falls back to [`Self::activate`],
+    /// since doing nothing there would be indistinguishable from a hung
+    /// daemon — and a missing `hyprforge-traymenu` binary takes the same
+    /// fallback, once spawning it has actually been tried and failed,
+    /// for the reason CLAUDE.md gives for `spawn_settings`: a sibling
+    /// binary that isn't installed is a click served the next-best way,
+    /// never a daemon that stops working.
     async fn context_menu(&self, x: i32, y: i32) {
-        if self.menu_path.is_none() {
+        let (Some(menu), Some(events)) = (self.menu.clone(), self.menu_clicks.clone()) else {
             self.activate(x, y).await;
-        }
+            return;
+        };
+
+        let id = self.state.lock().await.id.clone();
+        // Never collapsed with "menu_y_offset is unreadable" turning into
+        // silence — an unreadable `tray.toml` is already warned about by
+        // `hyprforge-trayd`'s own poll loop every time it changes; this
+        // is just the one place that also needs a number out of it right
+        // now, and the default is the least surprising thing to use
+        // rather than refusing to open the menu at all.
+        let offset = match crate::prefs::load() {
+            Ok(prefs) => prefs.menu_y_offset,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read tray.toml for the menu's Y offset; using the default");
+                crate::prefs::Prefs::default().menu_y_offset
+            }
+        };
+
+        let state = self.state.clone();
+        let clicks = self.clicks.clone();
+        tokio::spawn(async move {
+            let snapshot = menu.lock().await.clone();
+            if let crate::launch::LaunchOutcome::NotInstalled =
+                crate::launch::show(&id, &snapshot, x, y.saturating_add(offset), &events).await
+            {
+                let screen = state.lock().await.activate_screen();
+                if let Some(screen) = screen {
+                    let _ = clicks.send(screen.to_string());
+                }
+            }
+        });
     }
 
     async fn scroll(&self, _delta: i32, _orientation: String) {}
@@ -222,9 +272,12 @@ pub struct TrayIcon {
     bus_name: String,
     state: Arc<Mutex<TrayItem>>,
     last: Mutex<TrayItem>,
-    /// `None` for an item registered without one.
+    /// `None` for an item registered without one. Never advertised over
+    /// D-Bus any more (see [`ItemInterface::menu`]) — this is purely this
+    /// daemon's own record of the menu's current content, for
+    /// [`ItemInterface::context_menu`] to hand to `hyprforge-traymenu`
+    /// the next time it is spawned.
     menu: Option<Arc<Mutex<crate::menu::Menu>>>,
-    menu_revision: Arc<Mutex<u32>>,
 }
 
 impl TrayIcon {
@@ -241,12 +294,13 @@ impl TrayIcon {
         Self::build(item, None, index, clicks, None).await
     }
 
-    /// Registers an item that also serves a right-click menu.
+    /// Registers an item that also has a right-click menu.
     ///
-    /// `menu_clicks` carries the [`crate::menu::MenuItem`] actions, kept
-    /// separate from `clicks` because the two mean different things: a
-    /// click on the icon says which settings screen to open, a click in
-    /// the menu says which operation to perform.
+    /// `menu_clicks` carries the [`crate::menu::MenuItem`] actions chosen
+    /// in `hyprforge-traymenu`, kept separate from `clicks` because the
+    /// two mean different things: a click on the icon says which settings
+    /// screen to open, a click in the menu says which operation to
+    /// perform.
     pub async fn register_with_menu(
         item: TrayItem,
         menu: crate::menu::Menu,
@@ -266,10 +320,12 @@ impl TrayIcon {
     ) -> Result<Self, TrayError> {
         let bus_name = format!("org.kde.StatusNotifierItem-{}-{}", std::process::id(), index);
         let state = Arc::new(Mutex::new(item.clone()));
-        let revision = Arc::new(Mutex::new(1u32));
         let menu_state = menu.map(|m| Arc::new(Mutex::new(m)));
 
-        let mut builder = zbus::connection::Builder::session()
+        // One object served at `ITEM_PATH` and nothing else — there used
+        // to be a second one, `com.canonical.dbusmenu` at `MENU_PATH`;
+        // see this crate's own module doc for why that no longer exists.
+        let builder = zbus::connection::Builder::session()
             .map_err(classify)?
             .name(bus_name.as_str())
             .map_err(classify)?
@@ -277,25 +333,12 @@ impl TrayIcon {
                 ITEM_PATH,
                 ItemInterface {
                     state: state.clone(),
-                    menu_path: menu_state.as_ref().map(|_| MENU_PATH.to_string()),
+                    menu: menu_state.clone(),
                     clicks,
+                    menu_clicks,
                 },
             )
             .map_err(classify)?;
-
-        if let (Some(menu_state), Some(menu_clicks)) = (menu_state.clone(), menu_clicks) {
-            builder = builder
-                .serve_at(
-                    MENU_PATH,
-                    crate::dbusmenu::MenuInterface::new(
-                        state.lock().await.id.clone(),
-                        menu_state,
-                        revision.clone(),
-                        menu_clicks,
-                    ),
-                )
-                .map_err(classify)?;
-        }
 
         let connection = builder.build().await.map_err(classify)?;
 
@@ -305,38 +348,30 @@ impl TrayIcon {
             state,
             last: Mutex::new(item),
             menu: menu_state,
-            menu_revision: revision,
         };
         icon.announce().await?;
         Ok(icon)
     }
 
-    /// Replaces the menu and tells the host its layout changed.
+    /// Replaces this daemon's own record of the menu's content.
     ///
-    /// The revision must go **up** every time. A host that sees the same
-    /// revision assumes nothing changed and keeps showing the menu it
-    /// cached, so a forgotten bump looks exactly like a menu that never
-    /// updates.
+    /// Used to bump a revision and signal a host that its cached layout
+    /// was stale, back when a host could cache one at all. There is
+    /// nothing left to notify: `hyprforge-traymenu` is spawned fresh on
+    /// every right click and reads whatever this holds at that moment, so
+    /// replacing it here is the entire update. Still skips the write when
+    /// nothing changed, the same as before, since a `Mutex` a poll tick
+    /// never needs to touch is a poll tick that never contends with a
+    /// menu click reading it.
     pub async fn update_menu(&self, next: crate::menu::Menu) -> Result<(), TrayError> {
         let Some(menu) = &self.menu else {
             return Ok(());
         };
-        {
-            let mut current = menu.lock().await;
-            if *current == next {
-                return Ok(());
-            }
+        let mut current = menu.lock().await;
+        if *current != next {
             *current = next;
         }
-        let revision = {
-            let mut revision = self.menu_revision.lock().await;
-            *revision += 1;
-            *revision
-        };
-        let emitter = SignalEmitter::new(&self.connection, MENU_PATH).map_err(classify)?;
-        crate::dbusmenu::MenuInterface::layout_updated(&emitter, revision, 0)
-            .await
-            .map_err(classify)
+        Ok(())
     }
 
     /// Tells the watcher this item exists.
@@ -455,5 +490,61 @@ mod tests {
         let mut changed = item();
         changed.icon_name = "network-wireless-signal-weak".to_string();
         assert_ne!(item(), changed);
+    }
+
+    // --- `menu()`: the whole point of retiring `com.canonical.dbusmenu`
+    // is that a host never sees a path to ask about, whether or not this
+    // item actually has one recorded for `context_menu` to use.
+
+    fn interface(menu: Option<crate::menu::Menu>) -> ItemInterface {
+        let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (menu_clicks, _mrx) = tokio::sync::mpsc::unbounded_channel();
+        ItemInterface {
+            state: Arc::new(Mutex::new(item())),
+            menu: menu.map(|m| Arc::new(Mutex::new(m))),
+            clicks,
+            menu_clicks: Some(menu_clicks),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_menu_property_is_always_the_root_path_even_with_a_menu_recorded() {
+        let with_menu = interface(Some(crate::menu::Menu::new(vec![crate::menu::MenuItem::standard(
+            "home",
+            "connect:home",
+        )])));
+        assert_eq!(with_menu.menu().await.as_str(), "/");
+    }
+
+    #[tokio::test]
+    async fn the_menu_property_is_the_root_path_with_no_menu_at_all() {
+        let without_menu = interface(None);
+        assert_eq!(without_menu.menu().await.as_str(), "/");
+    }
+
+    /// `item_is_menu` must stay `false` regardless of whether a menu is
+    /// recorded — this item's own primary action is still what a left
+    /// click should reach, menu or no menu (see the property's own doc).
+    #[tokio::test]
+    async fn item_is_menu_stays_false_whether_or_not_there_is_a_menu() {
+        assert!(!interface(None).item_is_menu().await);
+        assert!(
+            !interface(Some(crate::menu::Menu::default())).item_is_menu().await
+        );
+    }
+
+    /// An item with no menu at all falls back to its primary action on a
+    /// right click, the same as it always has — this is the one
+    /// `context_menu` path that needs no `hyprforge-traymenu` on `$PATH`
+    /// to test deterministically; the "menu present but the binary is
+    /// missing" fallback is covered live by `launch`'s own tests instead,
+    /// since it would otherwise depend on whatever happens to be on this
+    /// test's `$PATH`.
+    #[tokio::test]
+    async fn context_menu_with_no_menu_at_all_falls_back_to_the_primary_action() {
+        let (clicks, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let iface = ItemInterface { state: Arc::new(Mutex::new(item())), menu: None, clicks, menu_clicks: None };
+        iface.context_menu(0, 0).await;
+        assert_eq!(rx.recv().await.unwrap(), "network", "hyprforge-network opens the network screen");
     }
 }

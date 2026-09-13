@@ -15,6 +15,13 @@
 //! field is exactly what lets an old `tray.toml` that only ever named
 //! `network`/`bluetooth` keep meaning the same thing after this file
 //! grows two more fields.
+//!
+//! `menu_y_offset` is unrelated to which icons show: it is how far below
+//! the click `hyprforge-traymenu` opens (`ItemInterface::context_menu`,
+//! in `sni.rs`) — the popup has no way to ask Hyprland how tall the bar
+//! it was clicked from is, so this is the user's own answer to that,
+//! read fresh on every right click the same way every other field here
+//! is re-read on every poll tick.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -26,6 +33,12 @@ pub struct Prefs {
     pub bluetooth: bool,
     pub keep_awake: bool,
     pub night_light: bool,
+    /// Logical pixels added to a click's own Y position before the tray
+    /// menu opens there — see this module's own doc. `32` clears a
+    /// waybar-height bar (that bar defaults to about 34px tall) without
+    /// needing configuration on the common case; a taller or shorter bar
+    /// is what this field is for.
+    pub menu_y_offset: i32,
 }
 
 impl Default for Prefs {
@@ -35,6 +48,7 @@ impl Default for Prefs {
             bluetooth: true,
             keep_awake: false,
             night_light: false,
+            menu_y_offset: 32,
         }
     }
 }
@@ -170,6 +184,7 @@ mod tests {
             bluetooth: true,
             keep_awake: true,
             night_light: true,
+            menu_y_offset: 50,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap(), prefs);
@@ -204,5 +219,28 @@ mod tests {
         assert!(!prefs.bluetooth);
         assert!(!prefs.keep_awake, "an icon added later than this file defaults off");
         assert!(!prefs.night_light, "an icon added later than this file defaults off");
+    }
+
+    /// A `tray.toml` written before `menu_y_offset` existed must still
+    /// parse and get the default — the same backward-compatibility
+    /// property the two icon fields above already have to hold, now
+    /// extended to a field that is not a bool.
+    #[test]
+    fn a_tray_toml_naming_no_offset_gets_the_default_that_clears_a_typical_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "network = true\nbluetooth = true\n").unwrap();
+
+        let prefs = load_from(&path).unwrap();
+        assert_eq!(prefs.menu_y_offset, 32);
+    }
+
+    #[test]
+    fn a_configured_offset_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        let prefs = Prefs { menu_y_offset: 48, ..Prefs::default() };
+        save_to(&path, &prefs).unwrap();
+        assert_eq!(load_from(&path).unwrap().menu_y_offset, 48);
     }
 }

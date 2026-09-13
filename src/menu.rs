@@ -2,10 +2,22 @@
 //!
 //! Same split as [`crate::item`]: the question worth testing is which
 //! entries a given radio state deserves, and that is a pure function over
-//! plain data. [`crate::dbusmenu`] is only the marshalling.
+//! plain data.
+//!
+//! Every type here derives `Serialize`/`Deserialize` for one reason: this
+//! is now the wire format `hyprforge-trayd` hands `hyprforge-traymenu` on
+//! its stdin, as JSON — see `crate::launch`. That is a private pipe
+//! between a daemon and the one popup it just spawned, never a
+//! `com.canonical.dbusmenu` object exposed to an arbitrary host, which is
+//! what makes it safe to serialise [`MenuItem::action`] directly instead
+//! of the id-indirection a real dbusmenu host would need (`hyprforge-tray`
+//! no longer implements that protocol at all — see this crate's own
+//! module doc).
+
+use serde::{Deserialize, Serialize};
 
 /// What a row does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ItemKind {
     /// An ordinary clickable row.
     Standard,
@@ -22,7 +34,7 @@ pub enum ItemKind {
 /// id it already knows: renumbering rows between revisions makes a click
 /// land on whatever row inherited the number. Ids are assigned from the
 /// content, not from position — see `assign_ids`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MenuItem {
     pub id: i32,
     pub label: String,
@@ -31,9 +43,12 @@ pub struct MenuItem {
     pub kind: ItemKind,
     /// `Some` only for [`ItemKind::Checkmark`].
     pub toggle: Option<bool>,
-    /// What clicking this row should do. Not sent over D-Bus — the host
-    /// sends back the id, and this is how the daemon knows what that id
-    /// meant.
+    /// What clicking this row should do. Serialised now, unlike before
+    /// `hyprforge-traymenu` existed: this crate's own popup is the only
+    /// thing that ever reads it (see `crate::launch`), and it hands the
+    /// string straight back on its own stdout rather than an id needing a
+    /// second lookup — there is no host here to keep it from, the way a
+    /// real dbusmenu client is kept from it.
     pub action: Option<String>,
     pub children: Vec<MenuItem>,
 }
@@ -130,7 +145,7 @@ pub fn radio_menu(top: Vec<MenuItem>, content: Vec<MenuItem>, settings: MenuItem
 }
 
 /// A whole menu, with ids assigned.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Menu {
     pub items: Vec<MenuItem>,
 }
@@ -359,5 +374,41 @@ mod tests {
             settings(),
         );
         assert_eq!(short.items[0].id, long.items[0].id, "the toggle is row 1 in both");
+    }
+
+    // --- JSON round trip: the wire format `hyprforge-trayd` hands
+    // `hyprforge-traymenu` on stdin. Getting this wrong is silent in
+    // exactly the way `dbusmenu.rs`'s own module doc warned about for the
+    // old protocol — a menu that deserialises with the wrong shape opens
+    // an empty or broken popup, with nothing logged at either end.
+
+    #[test]
+    fn a_menu_round_trips_through_json_including_a_nested_child() {
+        let menu = radio_menu(
+            vec![MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off")],
+            vec![MenuItem {
+                children: vec![MenuItem::standard("child", "wifi:connect:686f6d65")],
+                ..MenuItem::standard("home", "wifi:connect:686f6d65")
+            }],
+            MenuItem::standard("Wi-Fi settings…", "wifi:settings"),
+        );
+        let json = serde_json::to_string(&menu).expect("a menu always serialises");
+        let restored: Menu = serde_json::from_str(&json).expect("what was serialised must deserialise");
+        assert_eq!(menu, restored);
+    }
+
+    /// The action string is the whole point of serialising this at all —
+    /// `hyprforge-traymenu` prints it straight back on its own stdout, so
+    /// it must survive the round trip unchanged, `None` included (a
+    /// separator or a disabled row carries none).
+    #[test]
+    fn the_action_string_survives_the_round_trip() {
+        let menu = sample();
+        let json = serde_json::to_string(&menu).unwrap();
+        let restored: Menu = serde_json::from_str(&json).unwrap();
+        let home = restored.flatten().into_iter().find(|i| i.label == "home").unwrap();
+        assert_eq!(home.action.as_deref(), Some("connect:home"));
+        let sep = restored.flatten().into_iter().find(|i| i.kind == ItemKind::Separator).unwrap();
+        assert_eq!(sep.action, None);
     }
 }

@@ -3,11 +3,18 @@ name = "hyprforge-tray"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "A StatusNotifierItem/dbusmenu tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running."
+# No longer "StatusNotifierItem/dbusmenu": this crate stopped serving
+# com.canonical.dbusmenu (see src/lib.rs's own module doc for the cost
+# that carries) in favour of `hyprforge-traymenu`, a sibling popup this
+# crate's own `sni::ItemInterface::context_menu` spawns directly. Say so
+# here too, or this description would be exactly the stale claim
+# CLAUDE.md's rule about a comment describing behaviour that no longer
+# exists warns against — just in a manifest instead of a doc comment.
+description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
 repository = "https://github.com/adamrpostjr/hyprforge"
 documentation = "https://docs.rs/hyprforge-tray"
 readme = "README.md"
-keywords = ["hyprland", "tray", "statusnotifier", "dbusmenu", "linux"]
+keywords = ["hyprland", "tray", "statusnotifier", "linux"]
 categories = ["os::linux-apis", "gui"]
 
 # The library is the StatusNotifierItem protocol and nothing else — it
@@ -36,6 +43,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+# The wire format `launch.rs` hands `hyprforge-traymenu` on its stdin —
+# see that module's own doc.
+serde_json = "1"
 toml = "1.1"
 anyhow = "1"
 

@@ -93,16 +93,17 @@ impl TrayItem {
             // Night light lives on the Desktop screen's "Night light" tab
             // today; there is no `--screen` argument for a specific tab,
             // so this opens the screen and leaves picking the tab to
-            // whoever clicked.
-            // Each names a *tab*, not just a screen, so a click lands on
-            // the page carrying that icon's own setting rather than on
-            // whichever tab the Desktop screen opens with.
+            // whoever clicked. It names the *tab*, not just the screen,
+            // so a click lands on the page carrying its own setting
+            // rather than on whichever tab the Desktop screen opens with.
             "hyprforge-night-light" => Some("night-light"),
-            "hyprforge-keep-awake" => Some("idle"),
-            // Keep awake has no Settings screen of its own yet — see
-            // `hyprforge-trayd`'s module doc for why that is a follow-up
-            // rather than something this daemon invents a destination
-            // for. Falls through to `None`, same as any other unknown id.
+            // Keep awake has its own Power screen now (see
+            // `hyprforge-trayd`'s module doc) — this used to point at
+            // `"idle"`, the Desktop screen's tab it lived on before the
+            // move, and would have silently kept sending clicks there
+            // forever if nothing had updated it alongside the move.
+            "hyprforge-keep-awake" => Some("power"),
+            // An id nothing claims falls through to `None`.
             _ => None,
         }
     }
@@ -142,10 +143,10 @@ mod tests {
 
     /// Each icon opens the page its own setting is on.
     ///
-    /// Both of these live on a *tab* of the Desktop screen, so they name
-    /// the tab rather than the screen: naming the screen landed night
-    /// light on Wallpaper, and keep awake had no mapping at all, so its
-    /// click resolved to `None` and was silently dropped.
+    /// Night light names a *tab* of the Desktop screen rather than a
+    /// screen of its own — naming the screen instead once landed it on
+    /// Wallpaper. Keep awake names the Power screen it now lives on,
+    /// having moved off that same Desktop screen's `Idle` tab.
     #[test]
     fn every_icon_opens_the_page_its_own_setting_is_on() {
         let item = |id: &str| TrayItem {
@@ -161,7 +162,7 @@ mod tests {
             item("hyprforge-night-light").activate_screen(),
             Some("night-light")
         );
-        assert_eq!(item("hyprforge-keep-awake").activate_screen(), Some("idle"));
+        assert_eq!(item("hyprforge-keep-awake").activate_screen(), Some("power"));
         // An id nothing claims still resolves to nothing, rather than to
         // whichever arm happens to be last.
         assert_eq!(item("hyprforge-nonsense").activate_screen(), None);

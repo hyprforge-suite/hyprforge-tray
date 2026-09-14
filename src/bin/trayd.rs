@@ -29,15 +29,16 @@
 //! # Where every menu's settings row goes
 //!
 //! All four now land somewhere real. `--screen network` and
-//! `--screen bluetooth` open those screens directly; `--screen idle` and
-//! `--screen night-light` deep-link to the `Idle` and `NightLight` tabs
-//! of the Desktop screen (`hyprforge-settings`'s `screen_from_cli`) —
-//! which is also what `TrayItem::activate_screen` already sends a left
-//! click on either icon to. Neither destination existed when this
-//! daemon's keep-awake and night-light icons were first added; both do
-//! now, so a settings row that used to have nowhere honest to send
-//! anyone finally does, and the two icons stop being the one pair of the
-//! four without a way out of their own menu.
+//! `--screen bluetooth` open those screens directly; `--screen power`
+//! opens the Power screen, where keep-awake now lives (it moved off the
+//! Desktop screen's `Idle` tab); `--screen night-light` deep-links to the
+//! `NightLight` tab of the Desktop screen (`hyprforge-settings`'s
+//! `screen_from_cli`) — which is also what `TrayItem::activate_screen`
+//! already sends a left click on either icon to. Neither destination
+//! existed when this daemon's keep-awake and night-light icons were
+//! first added; both do now, so a settings row that used to have nowhere
+//! honest to send anyone finally does, and the two icons stop being the
+//! one pair of the four without a way out of their own menu.
 
 use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};
@@ -1397,7 +1398,10 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
         "bt:radio:off" => Some(MenuAction::BtRadio(false)),
         "keepawake:on" => Some(MenuAction::KeepAwake(true)),
         "keepawake:off" => Some(MenuAction::KeepAwake(false)),
-        "keepawake:settings" => Some(MenuAction::OpenSettings("idle")),
+        // Keep-awake moved off the Desktop screen's `Idle` tab and onto
+        // its own Power screen — see this module's doc comment — so this
+        // opens `--screen power`, not the `idle` stand-in it used to.
+        "keepawake:settings" => Some(MenuAction::OpenSettings("power")),
         "nightlight:off" => Some(MenuAction::NightLightOff),
         "nightlight:settings" => Some(MenuAction::OpenSettings("night-light")),
         _ => {
@@ -2634,7 +2638,7 @@ mod tests {
 
     /// The settings rows for keep awake and night light are new: neither
     /// menu offered one before this task, because neither destination
-    /// existed. Both do now (`--screen idle`, `--screen night-light`),
+    /// existed. Both do now (`--screen power`, `--screen night-light`),
     /// which is also what a left click on either icon already opens —
     /// see `TrayItem::activate_screen`. This pins the two rows to those
     /// same names, so the menu and the icon can never disagree about
@@ -2645,7 +2649,7 @@ mod tests {
         let ka_row = ka.items.last().unwrap();
         assert_eq!(
             parse_menu_action(ka_row.action.as_deref().unwrap()),
-            Some(MenuAction::OpenSettings("idle"))
+            Some(MenuAction::OpenSettings("power"))
         );
 
         let nl = night_light_menu(&NightLightState::Known { temperature: 4500, on: true });

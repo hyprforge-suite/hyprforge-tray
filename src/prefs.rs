@@ -133,6 +133,40 @@ pub fn save_to(path: &Path, prefs: &Prefs) -> Result<(), PrefsError> {
     })
 }
 
+/// Read-modify-write, and the one thing every writer of this file should
+/// call instead of saving a copy it loaded earlier.
+///
+/// This file has more than one writer inside a single `hyprforge-settings`
+/// process — the Network and Bluetooth screens each flip their own icon's
+/// bit, and the Tray screen this function was written for flips all four
+/// plus [`Prefs::menu_y_offset`] — and each of them loads `Prefs` once, at
+/// its own construction. Two screens open at once (or one screen left
+/// open while another is visited) hold two independently stale copies of
+/// the same struct, and a save that writes back "the whole struct as I
+/// last saw it" from either one **silently undoes** whatever the other
+/// screen wrote in between. Reloading right before every write is the
+/// only form of the save that is correct regardless of who else touched
+/// the file since — another screen in this process, `hyprforge-trayd`
+/// re-reading it (this crate never writes it), or the user's own editor.
+///
+/// It also composes with the rule in [`load_from`] for free: a `tray.toml`
+/// that exists and will not parse makes the reload fail, which returns
+/// here before `f` ever runs and before anything is written — the same
+/// "refuse and report, never silently overwrite" this module already
+/// promises for a plain load, now also true of every write.
+pub fn update(f: impl FnOnce(&mut Prefs)) -> Result<Prefs, PrefsError> {
+    update_at(&path(), f)
+}
+
+/// [`update`], against an arbitrary path — the seam a test uses to point
+/// this at a throwaway `tray.toml` instead of the real one.
+pub fn update_at(path: &Path, f: impl FnOnce(&mut Prefs)) -> Result<Prefs, PrefsError> {
+    let mut prefs = load_from(path)?;
+    f(&mut prefs);
+    save_to(path, &prefs)?;
+    Ok(prefs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +284,65 @@ mod tests {
         let prefs = Prefs { menu_y_offset: 48, ..Prefs::default() };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap().menu_y_offset, 48);
+    }
+
+    // --- `update`: the read-modify-write every writer shares -------------
+
+    /// The property this function exists to guarantee, pinned directly:
+    /// two independent "screens" (here, just two closures) each holding
+    /// nothing but the path, one flips `network` and the other flips
+    /// `menu_y_offset`, in either order — both must survive. A plain
+    /// load-mutate-save built on a copy loaded once, before either write,
+    /// would let the second write silently erase the first.
+    #[test]
+    fn two_writers_changing_different_fields_both_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        // Both "screens" load their own starting copy up front, the way
+        // `NetworkModule::new`/`BluetoothModule::new`/`TrayModule::new`
+        // each do in `hyprforge-settings` — before either has written
+        // anything.
+        let screen_a_initial = load_from(&path).unwrap();
+        let screen_b_initial = load_from(&path).unwrap();
+        assert_eq!(screen_a_initial, screen_b_initial, "both start from the same defaults");
+
+        // Screen A flips its own icon off.
+        update_at(&path, |p| p.network = false).unwrap();
+        // Screen B, still only holding what it loaded before A's write,
+        // flips a completely different field.
+        update_at(&path, |p| p.menu_y_offset = 60).unwrap();
+
+        let on_disk = load_from(&path).unwrap();
+        assert!(!on_disk.network, "screen A's write must not be undone by screen B's");
+        assert_eq!(on_disk.menu_y_offset, 60, "screen B's own write must have landed");
+    }
+
+    /// The composed half of the guarantee: a file that has gone bad
+    /// between load and write must refuse the write entirely, the same
+    /// as a plain load would refuse to hand back defaults for it.
+    #[test]
+    fn update_refuses_to_write_over_a_file_it_cannot_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "network = yes please\n").unwrap();
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = update_at(&path, |p| p.network = false)
+            .expect_err("a file that won't parse must refuse the write, not overwrite it");
+        assert!(matches!(err, PrefsError::Unreadable { .. }));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after, "the mutation must never have been applied or saved");
+    }
+
+    /// `update` on a first run (no file yet) still works, starting from
+    /// the same defaults `load_from` would hand back.
+    #[test]
+    fn update_on_a_missing_file_starts_from_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        let updated = update_at(&path, |p| p.keep_awake = true).unwrap();
+        assert!(updated.keep_awake);
+        assert!(updated.network, "everything else stays at its default");
+        assert_eq!(load_from(&path).unwrap(), updated);
     }
 }

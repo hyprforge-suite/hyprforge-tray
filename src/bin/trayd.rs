@@ -829,15 +829,30 @@ fn network_item(
 
     match status.radio {
         // Off (switched off in software) and HardwareOff (rfkill) both
-        // mean the radio is not on — the one case `item.rs` says to hide.
+        // mean the radio is not on.
+        //
+        // `Active`, not `Passive`. This used to hide, on the reasoning
+        // that a radio switched off elsewhere is not something the bar
+        // can act on — which the menu a few lines down has contradicted
+        // for as long as it has existed: it offers `wifi:radio:on`. So
+        // the icon vanished at exactly the moment its menu became most
+        // useful, and the only way back was the Settings app. That is
+        // the same argument `keep_awake_item` already makes about a
+        // switch having to be visible in both positions; it just was not
+        // applied here.
+        //
+        // "Disabled" is the icon and the tooltip, because that is all
+        // StatusNotifierItem offers: there is no opacity, no sensitivity
+        // flag, nothing a host is obliged to dim. A distinct name is the
+        // whole vocabulary.
         RadioState::Off | RadioState::HardwareOff => TrayItem {
             id,
             category: Category::Hardware,
-            status: TrayStatus::Passive,
+            status: TrayStatus::Active,
             title,
             icon_name: "network-wireless-disconnected-symbolic".to_string(),
             tooltip_title: "Wi-Fi is off".to_string(),
-            tooltip_body: String::new(),
+            tooltip_body: "Click for the menu to turn it back on".to_string(),
         },
         RadioState::On => match connected_ssid {
             Some(ssid) => TrayItem {
@@ -852,15 +867,24 @@ fn network_item(
                     None => "Connected".to_string(),
                 },
             },
-            // On and unconnected is exactly when someone goes looking for
-            // this icon, so — unlike the radio-off case — it stays
-            // visible rather than hiding.
+            // On and unconnected is exactly when someone goes looking
+            // for this icon.
+            //
+            // A *different* name from the radio-off case above, which is
+            // new: while "off" was hidden, both states could share
+            // `disconnected` and nobody could see both at once. Now that
+            // off is visible too, one name for two states would mean a
+            // user cannot tell "the radio is off" from "the radio is on
+            // and found nothing" — which are the two states with
+            // completely different things to do about them. Empty signal
+            // arcs for a radio that is on and searching; the crossed-out
+            // name for one that is off.
             None => TrayItem {
                 id,
                 category: Category::Hardware,
                 status: TrayStatus::Active,
                 title,
-                icon_name: "network-wireless-disconnected-symbolic".to_string(),
+                icon_name: "network-wireless-signal-none-symbolic".to_string(),
                 tooltip_title: "Not connected".to_string(),
                 tooltip_body: "Wi-Fi is on".to_string(),
             },
@@ -892,15 +916,17 @@ fn bluetooth_item(
 
     match status.state {
         // HardwareBlocked is rfkill, not "off" in software, but both
-        // mean the radio is not on — the case worth hiding for.
+        // mean the adapter is not on. `Active` for the same reason as
+        // Wi-Fi above: this item's own menu can switch it back on, so
+        // hiding it took away the one control that mattered.
         AdapterState::Off | AdapterState::HardwareBlocked => TrayItem {
             id,
             category: Category::Hardware,
-            status: TrayStatus::Passive,
+            status: TrayStatus::Active,
             title,
             icon_name: "network-bluetooth-inactive-symbolic".to_string(),
             tooltip_title: "Bluetooth is off".to_string(),
-            tooltip_body: String::new(),
+            tooltip_body: "Click for the menu to turn it back on".to_string(),
         },
         AdapterState::On | AdapterState::Changing => match connected_device {
             Some(device) => TrayItem {
@@ -916,12 +942,17 @@ fn bluetooth_item(
                 tooltip_title: device.alias.clone(),
                 tooltip_body: device.kind.label().to_string(),
             },
+            // Plain, not `activated`: same reasoning as Wi-Fi's empty
+            // arcs above. With the off state now visible, three states
+            // share this icon's position — off, on and idle, on and
+            // connected — and they need three names between them, or the
+            // icon stops carrying information.
             None => TrayItem {
                 id,
                 category: Category::Hardware,
                 status: TrayStatus::Active,
                 title,
-                icon_name: "network-bluetooth-activated-symbolic".to_string(),
+                icon_name: "network-bluetooth-symbolic".to_string(),
                 tooltip_title: "Not connected".to_string(),
                 tooltip_body: "Bluetooth is on".to_string(),
             },
@@ -1192,10 +1223,15 @@ fn keep_awake_item(held: Option<bool>, others: &[InhibitorInfo], unavailable: bo
             // can only see once it is already on is a toggle you cannot
             // reach.
             //
-            // The radios are the case Passive is right for: they hide
-            // when the *hardware* is off, which is a state the user chose
-            // elsewhere and cannot act on from the bar anyway. This is a
-            // switch, and a switch has to be visible in both positions.
+            // This is a switch, and a switch has to be visible in both
+            // positions. That used to read "the radios are the case
+            // Passive is right for" — which was wrong about this
+            // daemon's own code even as it was written: the Wi-Fi and
+            // Bluetooth menus have always offered to switch the radio
+            // back on, so hiding those icons took away the control at
+            // the moment it was wanted. They are `Active` in every state
+            // now, and nothing in this file asks a host to hide
+            // anything.
             status: TrayStatus::Active,
             title,
             icon_name: "changes-allow-symbolic".to_string(),
@@ -1297,10 +1333,17 @@ fn night_light_item(state: &NightLightState) -> TrayItem {
             tooltip_title: "Night light is on".to_string(),
             tooltip_body: format!("{temperature}K"),
         },
+        // `Active`, like every other state this daemon publishes. Off
+        // was `Passive` — hidden — which made this a toggle that
+        // disappeared in one of its two positions, the same defect the
+        // radios had and for the same reason: the menu behind this icon
+        // turns night light back on. Off and on already look different
+        // (`redshift-status-off-symbolic` against `-on-symbolic`), so
+        // nothing else was needed here.
         NightLightState::Known { on: false, .. } => TrayItem {
             id,
             category: Category::SystemServices,
-            status: TrayStatus::Passive,
+            status: TrayStatus::Active,
             title,
             icon_name: "redshift-status-off-symbolic".to_string(),
             tooltip_title: "Night light is off".to_string(),
@@ -1627,7 +1670,12 @@ mod tests {
         "network-wireless-disconnected-symbolic",
         "dialog-warning",
     ];
-    const BLUETOOTH_ICON_NAMES: &[&str] = &["network-bluetooth-activated-symbolic", "network-bluetooth-inactive-symbolic", "dialog-warning"];
+    const BLUETOOTH_ICON_NAMES: &[&str] = &[
+        "network-bluetooth-activated-symbolic",
+        "network-bluetooth-symbolic",
+        "network-bluetooth-inactive-symbolic",
+        "dialog-warning",
+    ];
     // Every name in this file is resolved against a real installed icon
     // theme by `live_icons.rs`, because an unresolvable name is the
     // quietest failure in this daemon: the bar draws a blank gap, and
@@ -1705,33 +1753,81 @@ mod tests {
 
     // --- radio off vs on-but-unconnected -----------------------------
 
+    /// A radio switched off keeps its icon. It used to be `Passive`,
+    /// which asks the host to hide it — so the icon disappeared at
+    /// exactly the moment its own menu could have switched the radio
+    /// back on, and the only way back was the Settings app.
     #[test]
-    fn a_switched_off_wifi_radio_is_passive_but_on_and_unconnected_is_active() {
+    fn a_switched_off_wifi_radio_still_shows_an_icon() {
         let off = network_item(Some(&net_status(RadioState::Off, None)), None, None, false);
-        assert_eq!(off.status, TrayStatus::Passive);
+        assert_eq!(off.status, TrayStatus::Active);
 
         let hw_off =
             network_item(Some(&net_status(RadioState::HardwareOff, None)), None, None, false);
-        assert_eq!(hw_off.status, TrayStatus::Passive, "rfkill also means the radio is not on");
+        assert_eq!(hw_off.status, TrayStatus::Active, "rfkill hides the icon no more than a software switch does");
 
         let on_unconnected = network_item(Some(&net_status(RadioState::On, None)), None, None, false);
-        assert_eq!(
-            on_unconnected.status,
-            TrayStatus::Active,
-            "on and unconnected is exactly when someone looks for the icon"
-        );
+        assert_eq!(on_unconnected.status, TrayStatus::Active);
     }
 
     #[test]
-    fn a_switched_off_bluetooth_adapter_is_passive_but_on_and_unconnected_is_active() {
+    fn a_switched_off_bluetooth_adapter_still_shows_an_icon() {
         let off = bluetooth_item(Some(&bt_status(AdapterState::Off)), None, false);
-        assert_eq!(off.status, TrayStatus::Passive);
+        assert_eq!(off.status, TrayStatus::Active);
 
         let blocked = bluetooth_item(Some(&bt_status(AdapterState::HardwareBlocked)), None, false);
-        assert_eq!(blocked.status, TrayStatus::Passive);
+        assert_eq!(blocked.status, TrayStatus::Active);
 
         let on_unconnected = bluetooth_item(Some(&bt_status(AdapterState::On)), None, false);
         assert_eq!(on_unconnected.status, TrayStatus::Active);
+    }
+
+    /// The property that makes the change above worth having. A
+    /// StatusNotifierItem has no opacity and no sensitivity flag — the
+    /// icon *name* is the entire vocabulary for "this is off" — so if
+    /// off and on-but-idle shared a name, keeping both visible would
+    /// show the user the same picture for the two states with the most
+    /// different things to do about them. While off was hidden they
+    /// could share one; now they cannot.
+    #[test]
+    fn a_radio_that_is_off_does_not_look_like_one_that_is_on_and_idle() {
+        let wifi_off = network_item(Some(&net_status(RadioState::Off, None)), None, None, false);
+        let wifi_idle = network_item(Some(&net_status(RadioState::On, None)), None, None, false);
+        assert_ne!(wifi_off.icon_name, wifi_idle.icon_name, "off and searching must be distinguishable");
+
+        let bt_off = bluetooth_item(Some(&bt_status(AdapterState::Off)), None, false);
+        let bt_idle = bluetooth_item(Some(&bt_status(AdapterState::On)), None, false);
+        let bt_connected = bluetooth_item(Some(&bt_status(AdapterState::On)), Some(&device("Headset", true)), false);
+        assert_ne!(bt_off.icon_name, bt_idle.icon_name);
+        assert_ne!(bt_idle.icon_name, bt_connected.icon_name, "idle and connected are three states, not two");
+    }
+
+    /// Nothing in this daemon asks a host to hide an icon any more. Every
+    /// item it can build is one the user switched on in `tray.toml`, and
+    /// a host hiding it is a control they cannot reach — the reasoning
+    /// `keep_awake_item` has carried since it was written, now true of
+    /// all four.
+    #[test]
+    fn no_item_this_daemon_builds_ever_asks_to_be_hidden() {
+        let items = [
+            network_item(Some(&net_status(RadioState::Off, None)), None, None, false),
+            network_item(Some(&net_status(RadioState::HardwareOff, None)), None, None, false),
+            network_item(Some(&net_status(RadioState::On, None)), None, None, false),
+            network_item(None, None, None, false),
+            bluetooth_item(Some(&bt_status(AdapterState::Off)), None, false),
+            bluetooth_item(Some(&bt_status(AdapterState::HardwareBlocked)), None, false),
+            bluetooth_item(Some(&bt_status(AdapterState::On)), None, false),
+            bluetooth_item(None, None, false),
+            night_light_item(&NightLightState::Known { temperature: 3500, on: false }),
+            night_light_item(&NightLightState::Known { temperature: 3500, on: true }),
+            night_light_item(&NightLightState::NotRunning),
+            keep_awake_item(Some(false), &[], false),
+            keep_awake_item(Some(true), &[], false),
+            keep_awake_item(None, &[], true),
+        ];
+        for item in items {
+            assert_eq!(item.status, TrayStatus::Active, "{} asked to be hidden", item.id);
+        }
     }
 
     // --- signal-strength boundaries ------------------------------------
@@ -2533,7 +2629,7 @@ mod tests {
         assert_eq!(on.status, TrayStatus::Active);
 
         let off = night_light_item(&NightLightState::Known { temperature: 3500, on: false });
-        assert_eq!(off.status, TrayStatus::Passive);
+        assert_eq!(off.status, TrayStatus::Active, "a toggle has to be visible in both positions");
         assert!(!off.tooltip_body.contains("3500"), "off has nothing numeric to show");
     }
 

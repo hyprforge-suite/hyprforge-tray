@@ -21,8 +21,11 @@
 //! D-Bus call like that out.
 
 use crate::menu::Menu;
-use tokio::io::AsyncWriteExt;
+use std::sync::LazyLock;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Child;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 /// Prefix of the event sent just before a menu is handed to
 /// `hyprforge-traymenu`; the item's own id follows, as
@@ -40,6 +43,38 @@ pub const OPENED_PREFIX: &str = "menu:opened:";
 /// this whole sequence at something other than the real popup — see this
 /// module's own tests.
 const TRAYMENU_BINARY: &str = "hyprforge-traymenu";
+
+/// The one tray menu that may be open at a time, and the handle that
+/// closes it.
+///
+/// Right-clicking a second icon while the first icon's menu was still
+/// open used to do nothing at all: `hyprforge-traymenu` takes an `flock`
+/// single-instance lock (`hyprforge_popup::singleton`), the second copy
+/// found it held and exited quietly and successfully. That is the right
+/// answer for a keybind pressed twice — which is what the lock was
+/// written for — and the wrong one for a click on a *different* icon,
+/// where the user is asking for a different menu and gets no sign that
+/// they asked for anything. It read as the tray being broken: press
+/// escape, then right click, and only then does the other menu appear.
+///
+/// So this daemon closes the menu it opened before opening another. It
+/// keeps the whole [`Child`] rather than just a pid, because killing is
+/// only half of it: the `flock` is released when the kernel closes the
+/// dead process's descriptors, and a zombie nobody has waited on still
+/// holds them. [`Child::kill`] signals *and* reaps, so when it returns
+/// the lock is genuinely free for the process about to ask for it.
+/// Signalling a bare pid and trusting the owning task to reap it in
+/// time is the version of this that races the new popup's own `acquire`.
+#[derive(Default)]
+pub struct OpenMenu(Mutex<Option<(u32, Child)>>);
+
+/// The slot [`show`] uses. Process-wide because what it models is: there
+/// is one `hyprforge-traymenu` lock per session, so there is one open
+/// menu per daemon, whichever of the four items was clicked. It is a
+/// parameter of [`show_with_binary`] rather than reached for directly,
+/// so tests get their own slot instead of racing each other through
+/// this one.
+static OPEN_MENU: LazyLock<OpenMenu> = LazyLock::new(OpenMenu::default);
 
 /// What became of one attempt to show the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +111,7 @@ pub enum LaunchOutcome {
 /// (`hyprforge-trayd`'s `scan_then_refresh`) still fires at the moment a
 /// user is about to see the menu, not some other time.
 pub async fn show(id: &str, menu: &Menu, x: i32, y: i32, events: &UnboundedSender<String>) -> LaunchOutcome {
-    show_with_binary(TRAYMENU_BINARY, id, menu, x, y, events).await
+    show_with_binary(TRAYMENU_BINARY, id, menu, x, y, events, &OPEN_MENU).await
 }
 
 /// [`show`], with the binary to run as a parameter — see
@@ -88,6 +123,7 @@ pub async fn show_with_binary(
     x: i32,
     y: i32,
     events: &UnboundedSender<String>,
+    open: &OpenMenu,
 ) -> LaunchOutcome {
     // Sent unconditionally, before anything can fail below: a menu that
     // is about to be shown is about to be shown even if the popup then
@@ -107,6 +143,21 @@ pub async fn show_with_binary(
             return LaunchOutcome::Failed;
         }
     };
+
+    // Close whatever is already open, and do it *before* spawning: the
+    // new popup refuses to start while another copy holds the lock, so
+    // the order here is the whole fix. Held across the spawn below too,
+    // so two right clicks arriving together cannot both get past this
+    // point and race each other for the lock.
+    let mut guard = open.0.lock().await;
+    if let Some((_, mut previous)) = guard.take() {
+        // A kill, not a polite close: there is no protocol for asking
+        // the popup to go away, and anything it printed on the way out
+        // would arrive here as an action the user never chose.
+        if let Err(e) = previous.kill().await {
+            tracing::warn!(error = %e, "couldn't close the tray menu that was already open");
+        }
+    }
 
     let mut child = match tokio::process::Command::new(binary)
         .arg("--x")
@@ -141,6 +192,25 @@ pub async fn show_with_binary(
         // reads to EOF, so this is what lets it stop waiting for more.
     }
 
+    // `stdout` is read here rather than through `wait_with_output`,
+    // because the `Child` itself now has somewhere else to be: the slot,
+    // where the *next* right click can reach it. Reading the pipe to EOF
+    // waits for the same thing waiting on the child would — the pipe
+    // closes when the process exits, whether it chose a row, was
+    // cancelled, or was killed by a later click replacing it.
+    let mut stdout = child.stdout.take();
+    let tracked = child.id();
+    match tracked {
+        Some(pid) => *guard = Some((pid, child)),
+        // Only reachable for a child that has already been waited on,
+        // which cannot have happened one statement after spawning it.
+        // Handled rather than unwrapped, and the cost of being wrong is
+        // one menu that a later right click replaces the slow way (the
+        // user pressing escape) rather than a panic in a daemon.
+        None => tracing::warn!("hyprforge-traymenu reported no pid immediately after spawn"),
+    }
+    drop(guard);
+
     // No bound on this wait: the popup is waiting on a *person*, not on
     // another program that is supposed to answer quickly — see this
     // module's own doc for why that is not the same "never wait without
@@ -148,15 +218,29 @@ pub async fn show_with_binary(
     // This runs on its own spawned task (`sni.rs::context_menu`), never on
     // a D-Bus dispatch path, so however long a user takes costs nothing
     // this daemon's event loop needs.
-    let output = match child.wait_with_output().await {
-        Ok(output) => output,
-        Err(e) => {
-            tracing::warn!(error = %e, "hyprforge-traymenu did not exit cleanly");
+    let mut printed = Vec::new();
+    if let Some(stdout) = stdout.as_mut() {
+        if let Err(e) = stdout.read_to_end(&mut printed).await {
+            tracing::warn!(error = %e, "couldn't read what hyprforge-traymenu chose");
             return LaunchOutcome::Failed;
         }
-    };
+    }
 
-    let action = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Reap it, but only if it is still the menu that is open. A later
+    // right click may have replaced this one while the read above was
+    // waiting on a person, and that click already killed and reaped it —
+    // matching on the pid is what keeps this from waiting on a child
+    // somebody else has taken responsibility for.
+    if let Some(pid) = tracked {
+        let mut guard = open.0.lock().await;
+        if guard.as_ref().is_some_and(|(open_pid, _)| *open_pid == pid) {
+            if let Some((_, mut child)) = guard.take() {
+                let _ = child.wait().await;
+            }
+        }
+    }
+
+    let action = String::from_utf8_lossy(&printed).trim().to_string();
     if !action.is_empty() {
         let _ = events.send(action);
     }
@@ -179,7 +263,7 @@ mod tests {
     async fn a_missing_binary_is_reported_as_not_installed_rather_than_panicking() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome =
-            show_with_binary("hyprforge-traymenu-does-not-exist-xyz", "hyprforge-network", &menu(), 10, 20, &tx)
+            show_with_binary("hyprforge-traymenu-does-not-exist-xyz", "hyprforge-network", &menu(), 10, 20, &tx, &OpenMenu::default())
                 .await;
         assert_eq!(outcome, LaunchOutcome::NotInstalled);
         // The opened event still fires even though nothing could be shown.
@@ -214,12 +298,103 @@ mod tests {
         }
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = show_with_binary(script.to_str().unwrap(), "hyprforge-network", &menu(), 10, 20, &tx).await;
+        let outcome =
+            show_with_binary(script.to_str().unwrap(), "hyprforge-network", &menu(), 10, 20, &tx, &OpenMenu::default())
+                .await;
         assert_eq!(outcome, LaunchOutcome::Spawned);
 
         assert_eq!(rx.recv().await.unwrap(), "menu:opened:hyprforge-network");
         let echoed = rx.recv().await.unwrap();
         let restored: Menu = serde_json::from_str(&echoed).expect("the script must have echoed valid JSON back");
         assert_eq!(restored, menu(), "the menu handed to stdin must be exactly what was echoed back");
+    }
+
+    /// Writes an executable script and hands back its path. The scripts
+    /// here stand in for `hyprforge-traymenu` — see the test above for
+    /// why plain `cat` cannot play the part.
+    fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// The bug a user reported as "I have to hit escape first": right
+    /// click the Wi-Fi icon, then right click Bluetooth, and nothing
+    /// happens — the second popup finds the first one's single-instance
+    /// lock held and exits without drawing anything.
+    ///
+    /// The first menu stands in as a script that never exits on its own,
+    /// so the only way this test can finish is the second call actually
+    /// closing it. A `timeout` rather than an unbounded await, because
+    /// the failure this is written against is precisely "the first menu
+    /// stays open forever" — and a test that hangs reports far worse
+    /// than one that fails.
+    #[tokio::test]
+    async fn a_right_click_on_another_icon_replaces_the_menu_already_open() {
+        let dir = tempfile::tempdir().unwrap();
+        // Reads its stdin away so the write side never blocks, then sits
+        // there holding its stdout open: no EOF, no exit, until killed.
+        // `exec`, so the process that ends up holding that pipe is the
+        // very pid this spawned — a plain `sleep 300` would leave a
+        // grandchild inheriting stdout and outliving the kill, which is
+        // a shape `hyprforge-traymenu` itself never has, and would make
+        // this test measure the script instead of the code under it.
+        let forever =
+            script(dir.path(), "forever.sh", "#!/bin/sh\ncat >/dev/null\nexec sleep 300\n");
+        let echo = script(dir.path(), "echo-stdin.sh", "#!/bin/sh\ncat\n");
+
+        let open = std::sync::Arc::new(OpenMenu::default());
+        let (first_tx, _first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let first = tokio::spawn({
+            let open = open.clone();
+            let forever = forever.clone();
+            async move {
+                show_with_binary(forever.to_str().unwrap(), "hyprforge-network", &menu(), 10, 20, &first_tx, &open)
+                    .await
+            }
+        });
+
+        // Wait for the first menu to actually be open before replacing
+        // it — polled rather than slept, since what matters is the slot
+        // being occupied, not any particular length of time.
+        for _ in 0..200 {
+            if open.0.lock().await.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(open.0.lock().await.is_some(), "the first menu should be the one that is open");
+
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome =
+            show_with_binary(echo.to_str().unwrap(), "hyprforge-bluetooth", &menu(), 30, 20, &second_tx, &open).await;
+        assert_eq!(outcome, LaunchOutcome::Spawned, "the second menu must open, not be refused");
+        assert_eq!(second_rx.recv().await.unwrap(), "menu:opened:hyprforge-bluetooth");
+        let echoed = second_rx.recv().await.unwrap();
+        serde_json::from_str::<Menu>(&echoed).expect("the second menu really ran and got its JSON");
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), first)
+            .await
+            .expect("the first menu must have been closed, not left open")
+            .unwrap();
+        assert_eq!(first, LaunchOutcome::Spawned, "being replaced is not a failure of the menu that was open");
+    }
+
+    /// The other half of the same property: once a menu has closed on
+    /// its own, nothing is left in the slot for the next right click to
+    /// kill. A stale entry there would mean the next click spends a
+    /// signal on a pid that may since belong to somebody else.
+    #[tokio::test]
+    async fn a_menu_that_closes_on_its_own_leaves_nothing_behind_to_kill() {
+        let dir = tempfile::tempdir().unwrap();
+        let echo = script(dir.path(), "echo-stdin.sh", "#!/bin/sh\ncat\n");
+
+        let open = OpenMenu::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        show_with_binary(echo.to_str().unwrap(), "hyprforge-network", &menu(), 10, 20, &tx, &open).await;
+
+        assert!(open.0.lock().await.is_none(), "a menu that exited should not still be the open one");
     }
 }

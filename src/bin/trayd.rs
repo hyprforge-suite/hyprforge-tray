@@ -1979,7 +1979,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32 };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -1998,12 +1998,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32 };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32 },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");

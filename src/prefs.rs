@@ -47,6 +47,18 @@ pub struct Prefs {
     /// needing configuration on the common case; a taller or shorter bar
     /// is what this field is for.
     pub menu_y_offset: i32,
+    /// Whether clicking outside an open tray menu dismisses it.
+    ///
+    /// Not a cosmetic preference: it decides how the popup asks the
+    /// compositor for the keyboard, because those are the same question
+    /// (see `hyprforge_popup::Dismissal`). `true` — the default, and how
+    /// every other menu on the desktop behaves — means the menu takes
+    /// the keyboard only while it is being used, so a click elsewhere
+    /// both closes it *and* reaches whatever it landed on. `false` means
+    /// the menu holds the keyboard until it is dismissed deliberately,
+    /// which is what somebody driving it entirely from the keyboard
+    /// would want, at the cost of a stray click doing nothing.
+    pub menu_closes_on_click_outside: bool,
 }
 
 impl Default for Prefs {
@@ -57,6 +69,7 @@ impl Default for Prefs {
             keep_awake: false,
             night_light: false,
             menu_y_offset: 32,
+            menu_closes_on_click_outside: true,
         }
     }
 }
@@ -227,6 +240,7 @@ mod tests {
             keep_awake: true,
             night_light: true,
             menu_y_offset: 50,
+            menu_closes_on_click_outside: false,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap(), prefs);
@@ -275,6 +289,22 @@ mod tests {
 
         let prefs = load_from(&path).unwrap();
         assert_eq!(prefs.menu_y_offset, 32);
+    }
+
+    /// The same backward-compatibility property every field here has to
+    /// hold, for the field most likely to be missing: a `tray.toml`
+    /// written before clicking away meant anything must read as the
+    /// behaviour every other menu on the desktop already has, rather
+    /// than as "off".
+    #[test]
+    fn a_tray_toml_written_before_this_setting_existed_closes_on_a_click_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "network = true\nmenu_y_offset = 40\n").unwrap();
+
+        let prefs = load_from(&path).unwrap();
+        assert_eq!(prefs.menu_y_offset, 40);
+        assert!(prefs.menu_closes_on_click_outside, "a file that predates the field gets the default, not false");
     }
 
     #[test]

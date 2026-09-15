@@ -289,6 +289,10 @@ mod tests {
     /// it echoes regardless of what `--x`/`--y` this test passes.
     #[tokio::test]
     async fn whatever_the_child_prints_on_stdout_reaches_the_events_channel() {
+        // See `SPAWNING`: held for the whole body, because the
+        // hazard is a fork anywhere else while this test's script
+        // is still open for writing.
+        let _spawning = SPAWNING.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("echo-stdin.sh");
         std::fs::write(&script, "#!/bin/sh\ncat\n").unwrap();
@@ -308,6 +312,27 @@ mod tests {
         let restored: Menu = serde_json::from_str(&echoed).expect("the script must have echoed valid JSON back");
         assert_eq!(restored, menu(), "the menu handed to stdin must be exactly what was echoed back");
     }
+
+    /// Serialises "write an executable, then exec it" across the tests
+    /// in this module.
+    ///
+    /// Without it these fail intermittently — measured at 2 runs in 12
+    /// of the whole crate, and never once in 25 runs of the test alone,
+    /// which is the signature of a race with a *sibling* test rather
+    /// than a bug in the test itself.
+    ///
+    /// The race is `ETXTBSY`, and it is a real Unix one rather than
+    /// anything specific to this code. When one thread has an
+    /// executable open for writing and another thread forks, the child
+    /// inherits that open write descriptor; exec of that same file then
+    /// fails with "text file busy". Every test here writes a stand-in
+    /// script and immediately runs it, and `show_with_binary` forks — so
+    /// with more than one running at once, one test's fork can poison
+    /// another test's exec.
+    ///
+    /// A `tokio::sync::Mutex` rather than a `std` one because it is held
+    /// across the `.await` on the child.
+    static SPAWNING: Mutex<()> = Mutex::const_new(());
 
     /// Writes an executable script and hands back its path. The scripts
     /// here stand in for `hyprforge-traymenu` — see the test above for
@@ -333,6 +358,10 @@ mod tests {
     /// than one that fails.
     #[tokio::test]
     async fn a_right_click_on_another_icon_replaces_the_menu_already_open() {
+        // See `SPAWNING`: held for the whole body, because the
+        // hazard is a fork anywhere else while this test's script
+        // is still open for writing.
+        let _spawning = SPAWNING.lock().await;
         let dir = tempfile::tempdir().unwrap();
         // Reads its stdin away so the write side never blocks, then sits
         // there holding its stdout open: no EOF, no exit, until killed.
@@ -388,6 +417,10 @@ mod tests {
     /// signal on a pid that may since belong to somebody else.
     #[tokio::test]
     async fn a_menu_that_closes_on_its_own_leaves_nothing_behind_to_kill() {
+        // See `SPAWNING`: held for the whole body, because the
+        // hazard is a fork anywhere else while this test's script
+        // is still open for writing.
+        let _spawning = SPAWNING.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let echo = script(dir.path(), "echo-stdin.sh", "#!/bin/sh\ncat\n");
 

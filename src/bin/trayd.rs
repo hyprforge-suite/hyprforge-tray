@@ -535,6 +535,28 @@ fn icon_action(wanted: bool, currently_up: bool) -> IconAction {
     }
 }
 
+/// Whether this tick has to ask the backend how the icon's subject is
+/// doing.
+///
+/// Sampling is not free: between them the four samplers open a logind
+/// connection and call `ListInhibitors`, walk BlueZ's object tree, read
+/// NetworkManager's devices and access points, and spawn `pgrep` and
+/// `hyprctl` as subprocesses. All of it every [`POLL_INTERVAL`],
+/// forever.
+///
+/// An icon that is switched off *and* not currently registered needs
+/// none of it: [`icon_action`] answers `Keep` for that pair, and `Keep`
+/// with nothing registered does nothing at all with what was sampled.
+/// Keep-awake and night light are **off by default**, so a stock
+/// install was paying for two icons nobody had asked to see.
+///
+/// Still sampled when the icon is up but no longer wanted: that tick is
+/// the one that drops it, and taking this decision from the same pair
+/// `icon_action` reads is what keeps the two from disagreeing.
+fn needs_sampling(wanted: bool, currently_up: bool) -> bool {
+    !matches!((wanted, currently_up), (false, false))
+}
+
 /// Re-reads `tray.toml`, updating `current` only on success.
 ///
 /// A failure here — the file exists and will not parse — must never
@@ -676,23 +698,41 @@ async fn poll_loop(
 
         refresh_prefs(&mut prefs, &mut prefs_load_failed);
 
-        let (net_item, net_menu) = sample_network(&mut net_state).await;
-        let (bt_item, bt_menu) = sample_bluetooth(&mut bt_state).await;
-        let (ka_item, ka_menu) = sample_keep_awake(&mut power_state).await;
-        let (nl_item, nl_menu) = sample_night_light(&night_light_belief).await;
+        // What each icon wants, and whether it is currently registered —
+        // both settled before anything is sampled, because together they
+        // decide whether sampling is needed at all (`needs_sampling`).
+        let wanted = [prefs.network, prefs.bluetooth, prefs.keep_awake, prefs.night_light];
+        let mut up = [false; 4];
+        for (slot, is_up) in icons.iter().zip(up.iter_mut()) {
+            *is_up = slot.slot.lock().await.is_some();
+        }
 
-        // One row per icon: `(wanted, item, menu)` lined up against
-        // `icons` in the same fixed order `main` registered them in — see
-        // `ManagedIcon`'s doc comment for why this is a loop rather than
-        // four repeated `sync_icon` calls.
-        let ticks: [(bool, TrayItem, Menu); 4] = [
-            (prefs.network, net_item, net_menu),
-            (prefs.bluetooth, bt_item, bt_menu),
-            (prefs.keep_awake, ka_item, ka_menu),
-            (prefs.night_light, nl_item, nl_menu),
-        ];
-        for (icon, (wanted, item, menu)) in icons.iter().zip(ticks) {
-            sync_icon(&icon.slot, wanted, item, menu, icon.index, &clicks, &menu_clicks).await;
+        let net = needs_sampling(wanted[0], up[0]).then_some(());
+        let net = match net {
+            Some(()) => Some(sample_network(&mut net_state).await),
+            None => None,
+        };
+        let bt = match needs_sampling(wanted[1], up[1]) {
+            true => Some(sample_bluetooth(&mut bt_state).await),
+            false => None,
+        };
+        let ka = match needs_sampling(wanted[2], up[2]) {
+            true => Some(sample_keep_awake(&mut power_state).await),
+            false => None,
+        };
+        let nl = match needs_sampling(wanted[3], up[3]) {
+            true => Some(sample_night_light(&night_light_belief).await),
+            false => None,
+        };
+
+        // One row per icon, lined up against `icons` in the same fixed
+        // order `main` registered them in — see `ManagedIcon`'s doc
+        // comment for why this is a loop rather than four repeated
+        // `sync_icon` calls.
+        let ticks: [Option<(TrayItem, Menu)>; 4] = [net, bt, ka, nl];
+        for ((icon, sampled), want) in icons.iter().zip(ticks).zip(wanted) {
+            let Some((item, menu)) = sampled else { continue };
+            sync_icon(&icon.slot, want, item, menu, icon.index, &clicks, &menu_clicks).await;
         }
     }
 }
@@ -2047,6 +2087,29 @@ mod tests {
     fn an_icon_already_matching_the_preference_is_left_alone_either_way() {
         assert_eq!(icon_action(true, true), IconAction::Keep);
         assert_eq!(icon_action(false, false), IconAction::Keep);
+    }
+
+    /// The one pair that needs no backend call at all — and the pair a
+    /// stock install is in for two of the four icons, since keep-awake
+    /// and night light default to off.
+    ///
+    /// Sampling those meant a logind connection and a `ListInhibitors`,
+    /// plus a `pgrep` and an `hyprctl` subprocess, every poll interval
+    /// forever, to build an item that `icon_action` then threw away.
+    #[test]
+    fn an_icon_switched_off_and_not_showing_is_never_sampled() {
+        assert!(!needs_sampling(false, false));
+    }
+
+    /// Every pair `icon_action` does something for is still sampled —
+    /// including the tick that drops an icon just switched off, which
+    /// is why this reads the same two booleans rather than guessing
+    /// from the action.
+    #[test]
+    fn every_icon_that_is_shown_or_about_to_change_is_still_sampled() {
+        assert!(needs_sampling(true, false), "about to be registered");
+        assert!(needs_sampling(true, true), "showing, and still wanted");
+        assert!(needs_sampling(false, true), "showing, and about to be dropped");
     }
 
     // --- refresh_prefs: a bad file never changes what's already shown ----

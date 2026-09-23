@@ -388,7 +388,16 @@ mod tests {
         // Wait for the first menu to actually be open before replacing
         // it — polled rather than slept, since what matters is the slot
         // being occupied, not any particular length of time.
-        for _ in 0..200 {
+        //
+        // The bound is deliberately far longer than this can take. It
+        // exists so a menu that never opens fails rather than hangs the
+        // suite; it is not a claim about how quickly one does. The same
+        // helper in `hyprforge-greet` gave up after a second — fifty
+        // times its real figure — and still went red on a loaded CI
+        // runner, which is a test reporting someone else's scheduling
+        // as a bug here.
+        let giving_up_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < giving_up_at {
             if open.0.lock().await.is_some() {
                 break;
             }

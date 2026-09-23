@@ -24,6 +24,16 @@ categories = ["os::linux-apis", "gui"]
 name = "hyprforge-trayd"
 path = "src/bin/trayd.rs"
 
+# The right-click menu, in this crate rather than beside it. It is a
+# separate *binary* — `sni::ItemInterface::context_menu` spawns it — and
+# a binary cannot be fetched as a dependency the way a library can, so
+# it has to be inside the one directory `git subtree split` publishes or
+# the tray's repository ships a daemon whose menu does not exist. It
+# did, for a while. See repo-plan.md, "The shape a package has to have".
+[[bin]]
+name = "hyprforge-traymenu"
+path = "src/bin/traymenu/main.rs"
+
 [dependencies]
 # A tray icon is a D-Bus object, not a toolkit widget. That is the whole
 # reason this is possible at all: the suite forbids GTK and Qt, and every
@@ -70,6 +80,24 @@ hyprforge-bluetooth = { git = "https://github.com/adamrpostjr/hyprforge" }
 # same "binary-only" arrangement as network/bluetooth above.
 hyprforge-power = { git = "https://github.com/adamrpostjr/hyprforge" }
 hyprforge-ecosystem = { git = "https://github.com/adamrpostjr/hyprforge" }
+
+# Used only by the `hyprforge-traymenu` binary: the shared layer-shell
+# popup shell it is built on, and the theme it draws with. Same
+# binary-only arrangement as network/bluetooth above — Cargo has no way
+# to scope a dependency to one target of a crate that has several.
+hyprforge-popup = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-appearance = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
+
+# The menu renders itself into the popup's raw Wayland buffer, so it
+# needs iced's pieces directly rather than the `iced` umbrella: there is
+# no winit window here. `iced_tiny_skia` and not `iced_wgpu` — see
+# CLAUDE.md on `web-colors`, which is why every surface in this suite is
+# drawn by the same renderer.
+iced_tiny_skia = { version = "0.14", default-features = false, features = ["wayland"] }
+iced_runtime = "0.14"
+iced_widget = "0.14"
+iced_renderer = { version = "0.14", default-features = false, features = ["tiny-skia"] }
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

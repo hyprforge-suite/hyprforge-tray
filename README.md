@@ -1,9 +1,9 @@
 # hyprforge-tray
 
-A tray icon library over `org.kde.StatusNotifierItem` and
-`com.canonical.dbusmenu`, plus `hyprforge-trayd`, the daemon that puts
-Wi-Fi, Bluetooth, keep-awake and night-light icons in whatever bar is
-running.
+A tray icon library over `org.kde.StatusNotifierItem`, plus
+`hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake,
+night-light and battery/power-profile icons in whatever bar is running,
+and `hyprforge-traymenu`, which draws their right-click menus.
 
 Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone. Installing this gets
@@ -13,9 +13,13 @@ you a tray daemon and nothing else.
 
 A tray icon is a D-Bus object, not a widget drawn by a toolkit. This
 crate registers an `org.kde.StatusNotifierItem` with whichever
-`StatusNotifierWatcher` a bar runs, and offers its right-click menu over
-`com.canonical.dbusmenu` — the icon a user sees is the bar's own
-rendering of a name and a handful of properties read off the bus. That
+`StatusNotifierWatcher` a bar runs — the icon a user sees is the bar's
+own rendering of a name and a handful of properties read off the bus.
+The right-click menu is not left to the bar: `hyprforge-traymenu` draws
+it, themed like the rest of the suite and anchored below the bar. The
+cost is that a bar with no Hyprforge installed shows the icon and no
+menu, where a `com.canonical.dbusmenu` menu would have drawn anywhere;
+`src/lib.rs` has the reasoning. That
 is what makes it possible inside a suite that forbids GTK and Qt
 everywhere else: every other way to put an icon in a tray drags one of
 them in.
@@ -23,32 +27,36 @@ them in.
 ## What is in here
 
 - **The library** (`src/item.rs`, `src/menu.rs`, `src/sni.rs`,
-  `src/dbusmenu.rs`, `src/prefs.rs`) — the StatusNotifierItem and
-  dbusmenu protocols, and nothing else. It knows nothing about Wi-Fi or
+  `src/launch.rs`, `src/prefs.rs`) — the StatusNotifierItem protocol,
+  the menu model, and launching the popup that draws it, and nothing
+  else. It knows nothing about Wi-Fi or
   Bluetooth, the same way `hyprforge-ui` knows nothing about Hyprland.
 - **`hyprforge-trayd`** (`src/bin/trayd.rs`) — the daemon that joins the
   library to `hyprforge-network`, `hyprforge-bluetooth`,
-  `hyprforge-power` (keep awake, over `systemd-logind`) and
+  `hyprforge-power` (keep awake, over `systemd-logind`; battery and
+  power profile, over UPower and `power-profiles-daemon`) and
   `hyprforge-ecosystem::sunset_control` (night light, over
   `hyprctl hyprsunset`), and forwards a click to
   `hyprforge-settings --screen <name>`.
+- **`hyprforge-traymenu`** (`src/bin/traymenu/`) — the popup that draws
+  an item's right-click menu.
 
 ## The shape: backend trait, then the client
 
-`NetworkBackend`, `BluetoothBackend`, `InhibitBackend` and
-`SunsetBackend` are traits this daemon consumes, each with a mock
+`NetworkBackend`, `BluetoothBackend`, `InhibitBackend`,
+`BatteryBackend`, `PowerProfilesBackend` and `SunsetBackend` are traits this daemon consumes, each with a mock
 behind a `mock` feature — none of that lives in this crate, it is what
 `hyprforge-network`, `hyprforge-bluetooth`, `hyprforge-power` and
 `hyprforge-ecosystem` each expose. What *does* live here, and is
 deliberately structured the same way: which icon a given state
 deserves, and which rows a menu needs, are plain functions over plain
 data (`network_item`, `bluetooth_item`, `keep_awake_item`,
-`night_light_item` and their `*_menu` counterparts in `trayd.rs`, and
+`night_light_item`, `power_item` and their `*_menu` counterparts in `trayd.rs`, and
 the pure model in `src/item.rs` / `src/menu.rs`) — no D-Bus, no bar, no
 radio, so the interesting question is testable without any of the
-three. Everything else in `trayd.rs` is plumbing: polling the four
-backends, keeping four `TrayIcon`s in sync, and re-announcing when a bar
-restarts.
+three. Everything else in `trayd.rs` is plumbing: polling the
+backends, keeping one `TrayIcon` per item in sync, and re-announcing
+when a bar restarts.
 
 ## Two failure modes this always names
 

@@ -1,15 +1,17 @@
-//! `hyprforge-trayd`: four `org.kde.StatusNotifierItem`s — Wi-Fi and
-//! Bluetooth joined to `hyprforge-network` and `hyprforge-bluetooth`, plus
-//! keep-awake (`hyprforge-power`, over `systemd-logind`) and night light
-//! (`hyprforge-ecosystem::sunset_control`, over `hyprctl hyprsunset`).
+//! `hyprforge-trayd`: five `org.kde.StatusNotifierItem`s — Wi-Fi and
+//! Bluetooth joined to `hyprforge-network` and `hyprforge-bluetooth`,
+//! keep-awake (`hyprforge-power`, over `systemd-logind`), night light
+//! (`hyprforge-ecosystem::sunset_control`, over `hyprctl hyprsunset`), and
+//! battery and power profile (`hyprforge-power` again, over UPower and
+//! `power-profiles-daemon`).
 //!
 //! Everything that decides *which icon* a state deserves lives in the
 //! pure functions below (`network_item`, `bluetooth_item`, `keep_awake_item`,
-//! `night_light_item`) — no D-Bus, no I/O — so the interesting question is
-//! unit-tested without a bus, a bar, a radio, or hyprsunset, the same
-//! split `crate::item` documents. Everything else here is plumbing:
-//! polling the four backends, keeping four `TrayIcon`s in sync, and
-//! forwarding clicks to `hyprforge-settings`.
+//! `night_light_item`, `power_item`) — no D-Bus, no I/O — so the
+//! interesting question is unit-tested without a bus, a bar, a radio, or
+//! hyprsunset, the same split `crate::item` documents. Everything else
+//! here is plumbing: polling the backends, keeping one `TrayIcon` per
+//! item in sync, and forwarding clicks to `hyprforge-settings`.
 //!
 //! Whether an icon is shown at all is `hyprforge_tray::prefs`, re-read
 //! every poll tick (`refresh_prefs`) so a toggle in Settings takes effect
@@ -20,17 +22,19 @@
 //! the bus name a host is showing.
 //!
 //! Every menu (`network_menu`, `bluetooth_menu`, `keep_awake_menu`,
-//! `night_light_menu`) is built through `hyprforge_tray::menu::radio_menu`,
-//! which is the one shape all four follow: a toggle (or, when there is
+//! `night_light_menu`, `power_menu`) is built through
+//! `hyprforge_tray::menu::radio_menu`, which is the one shape all of them
+//! follow: a toggle (or, when there is
 //! nothing to toggle, a single disabled row saying why), the content that
 //! toggle governs, and a settings row — never omitted, unavailable states
 //! included. See `radio_menu`'s own doc for the reasoning.
 //!
 //! # Where every menu's settings row goes
 //!
-//! All four now land somewhere real. `--screen network` and
+//! All of them land somewhere real. `--screen network` and
 //! `--screen bluetooth` open those screens directly; `--screen power`
-//! opens the Power screen, where keep-awake now lives (it moved off the
+//! opens the Power screen — for the power icon, and for keep-awake,
+//! which lives there now too (it moved off the
 //! Desktop screen's `Idle` tab); `--screen night-light` deep-links to the
 //! `NightLight` tab of the Desktop screen (`hyprforge-settings`'s
 //! `screen_from_cli`) — which is also what `TrayItem::activate_screen`
@@ -47,7 +51,10 @@ use hyprforge_ecosystem::sunset_control::{Hyprsunset, SunsetBackend, SunsetContr
 use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend, SavedNetwork};
 use hyprforge_network::{AccessPoint, NetworkManagerBackend, RadioState, Ssid};
 use hyprforge_network::Status as NetStatus;
-use hyprforge_power::{InhibitBackend, InhibitorInfo, LogindBackend, WhatSet};
+use hyprforge_power::{
+    BatteryBackend, BatteryInfo, BatteryState, InhibitBackend, InhibitorInfo, LogindBackend,
+    PowerProfile, PowerProfilesBackend, PowerProfilesDaemonBackend, UPowerBackend, WhatSet,
+};
 use hyprforge_tray::menu::{radio_menu, Menu, MenuItem};
 use hyprforge_tray::prefs::{self, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
@@ -207,11 +214,21 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
+    let power_icon = register_with_retry(
+        power_item(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
+        power_menu(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
+        4,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
+
     let icons = vec![
         ManagedIcon::new(network_icon, 0),
         ManagedIcon::new(bluetooth_icon, 1),
         ManagedIcon::new(keep_awake_icon, 2),
         ManagedIcon::new(night_light_icon, 3),
+        ManagedIcon::new(power_icon, 4),
     ];
 
     // This daemon's own memory of whether night light is on — see
@@ -356,6 +373,28 @@ async fn keep_awake_backend(state: &mut Reconnecting<LogindBackend>) -> Option<A
     }
 }
 
+async fn upower_backend(state: &mut Reconnecting<UPowerBackend>) -> Option<Arc<UPowerBackend>> {
+    match state.get_or_connect(UPowerBackend::connect).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not connect to UPower; will retry");
+            None
+        }
+    }
+}
+
+async fn profiles_backend(
+    state: &mut Reconnecting<PowerProfilesDaemonBackend>,
+) -> Option<Arc<PowerProfilesDaemonBackend>> {
+    match state.get_or_connect(PowerProfilesDaemonBackend::connect).await {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not connect to power-profiles-daemon; will retry");
+            None
+        }
+    }
+}
+
 /// This daemon's own belief about whether night light is on, shared
 /// between the loop that samples it and the loop that acts on menu
 /// clicks.
@@ -462,6 +501,44 @@ async fn sample_keep_awake(state: &mut Reconnecting<LogindBackend>) -> (TrayItem
             (keep_awake_item(None, &[], true), keep_awake_menu(None, &[], true))
         }
     }
+}
+
+/// One tick's worth of the power icon and its menu.
+///
+/// Two daemons, asked independently, and each failure kept to its own
+/// half — see [`BatteryReading`] and [`ProfileReading`].
+async fn sample_power(
+    upower: &mut Reconnecting<UPowerBackend>,
+    profiles: &mut Reconnecting<PowerProfilesDaemonBackend>,
+) -> (TrayItem, Menu) {
+    let battery = match upower_backend(upower).await {
+        None => BatteryReading::Unavailable,
+        Some(backend) => match backend.battery().await {
+            Ok(Some(info)) => BatteryReading::Present(info),
+            Ok(None) => BatteryReading::Absent,
+            Err(e) => {
+                tracing::warn!(error = %e, "UPower battery call failed");
+                BatteryReading::Unavailable
+            }
+        },
+    };
+    let profile = match profiles_backend(profiles).await {
+        None => ProfileReading::Unavailable,
+        Some(backend) => match backend.active_profile().await {
+            Ok(active) => {
+                // A failed list read still knows the active profile, and
+                // offering only that one is honest; offering all three
+                // would be a guess about what this machine supports.
+                let offered = backend.profiles().await.unwrap_or_else(|_| vec![active]);
+                ProfileReading::Known { active, offered }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "power-profiles-daemon call failed");
+                ProfileReading::Unavailable
+            }
+        },
+    };
+    (power_item(&battery, &profile), power_menu(&battery, &profile))
 }
 
 /// Where night light stands, as far as this daemon can honestly claim to
@@ -675,6 +752,8 @@ async fn poll_loop(
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
     let mut power_state = Reconnecting::new();
+    let mut upower_state = Reconnecting::new();
+    let mut profiles_state = Reconnecting::new();
     // Every icon starts registered (see `main`), so the preferences this
     // loop starts from must match that — otherwise an icon the user
     // already switched off would flash on screen for up to one
@@ -701,8 +780,9 @@ async fn poll_loop(
         // What each icon wants, and whether it is currently registered —
         // both settled before anything is sampled, because together they
         // decide whether sampling is needed at all (`needs_sampling`).
-        let wanted = [prefs.network, prefs.bluetooth, prefs.keep_awake, prefs.night_light];
-        let mut up = [false; 4];
+        let wanted =
+            [prefs.network, prefs.bluetooth, prefs.keep_awake, prefs.night_light, prefs.power];
+        let mut up = [false; 5];
         for (slot, is_up) in icons.iter().zip(up.iter_mut()) {
             *is_up = slot.slot.lock().await.is_some();
         }
@@ -724,12 +804,16 @@ async fn poll_loop(
             true => Some(sample_night_light(&night_light_belief).await),
             false => None,
         };
+        let pw = match needs_sampling(wanted[4], up[4]) {
+            true => Some(sample_power(&mut upower_state, &mut profiles_state).await),
+            false => None,
+        };
 
         // One row per icon, lined up against `icons` in the same fixed
         // order `main` registered them in — see `ManagedIcon`'s doc
         // comment for why this is a loop rather than four repeated
         // `sync_icon` calls.
-        let ticks: [Option<(TrayItem, Menu)>; 4] = [net, bt, ka, nl];
+        let ticks: [Option<(TrayItem, Menu)>; 5] = [net, bt, ka, nl, pw];
         for ((icon, sampled), want) in icons.iter().zip(ticks).zip(wanted) {
             let Some((item, menu)) = sampled else { continue };
             sync_icon(&icon.slot, want, item, menu, icon.index, &clicks, &menu_clicks).await;
@@ -1445,6 +1529,195 @@ fn night_light_menu(state: &NightLightState) -> Menu {
     radio_menu(vec![toggle], content, settings_row)
 }
 
+const POWER_ITEM_ID: &str = "hyprforge-power";
+
+/// What the battery half of the power icon knows this tick.
+///
+/// Three states, not two, for the reason `BatteryBackend::battery` is an
+/// `Option` inside a `Result`: a desktop with no battery is an ordinary
+/// machine, and UPower not answering is a failure — the icon has to be
+/// able to say the second without implying the first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BatteryReading {
+    Present(BatteryInfo),
+    /// UPower answered: there is no system battery.
+    Absent,
+    /// UPower did not answer.
+    Unavailable,
+}
+
+/// The power-profile half. Independent of [`BatteryReading`] because it
+/// is a different daemon — `power-profiles-daemon` down leaves the
+/// battery readable, and the other way round.
+#[derive(Debug, Clone, PartialEq)]
+enum ProfileReading {
+    Known {
+        active: PowerProfile,
+        /// What the daemon says this machine can switch between, in its
+        /// own order — read rather than assumed to be all three.
+        offered: Vec<PowerProfile>,
+    },
+    Unavailable,
+}
+
+fn profile_label(profile: PowerProfile) -> &'static str {
+    match profile {
+        PowerProfile::PowerSaver => "Power saver",
+        PowerProfile::Balanced => "Balanced",
+        PowerProfile::Performance => "Performance",
+    }
+}
+
+/// Breeze's own names for the three profiles — `battery-profile-*`, not
+/// GNOME's `power-profile-*`, which exist only in Adwaita and are
+/// unreachable from this machine's theme chain (see the icon-name notes
+/// in the tests below).
+fn profile_icon(profile: PowerProfile) -> &'static str {
+    match profile {
+        PowerProfile::PowerSaver => "battery-profile-powersave-symbolic",
+        PowerProfile::Balanced => "battery-profile-balanced-symbolic",
+        PowerProfile::Performance => "battery-profile-performance-symbolic",
+    }
+}
+
+/// Whether the battery is taking charge, which is what the `-charging`
+/// icons draw — a plug over the level.
+fn is_charging(state: BatteryState) -> bool {
+    matches!(state, BatteryState::Charging | BatteryState::PendingCharge)
+}
+
+/// The level icon for a battery reading.
+///
+/// Breeze draws eleven levels in steps of ten, and the percentage is
+/// rounded to the *nearest* one: rounding down would show an empty
+/// battery at 9%, which reads as "about to die" a good while early.
+/// Fully charged gets its own name, because it is a plugged-in state
+/// that nothing about the level alone distinguishes from 100% on battery.
+fn battery_icon(info: &BatteryInfo) -> String {
+    if info.state == BatteryState::FullyCharged {
+        return "battery-full-charged-symbolic".to_string();
+    }
+    let level = ((u16::from(info.percentage) + 5) / 10 * 10).min(100);
+    let charging = if is_charging(info.state) { "-charging" } else { "" };
+    format!("battery-{level:03}{charging}-symbolic")
+}
+
+/// What the battery is doing, in the words a tooltip and a menu row
+/// share.
+fn battery_words(info: &BatteryInfo) -> String {
+    let pct = info.percentage;
+    match info.state {
+        BatteryState::FullyCharged => "Fully charged".to_string(),
+        BatteryState::Charging => match info.time_remaining_words() {
+            Some(t) => format!("{pct}% — charging, full in {t}"),
+            None => format!("{pct}% — charging"),
+        },
+        BatteryState::Discharging => match info.time_remaining_words() {
+            Some(t) => format!("{pct}% — {t} left"),
+            None => format!("{pct}% — on battery"),
+        },
+        // Plugged in and held below full (a charge limit, or the
+        // controller waiting): neither "charging" nor "on battery" is
+        // true, and saying either sends someone to check the cable.
+        BatteryState::PendingCharge => format!("{pct}% — plugged in, not charging"),
+        BatteryState::PendingDischarge | BatteryState::Empty | BatteryState::Unknown => {
+            format!("{pct}%")
+        }
+    }
+}
+
+/// What the power icon should say, from plain data — no D-Bus, no I/O.
+///
+/// The icon is the battery level when there is a battery, and the active
+/// profile when there is not: a desktop has no battery to draw, and the
+/// profile is then the only thing this icon can tell anyone. Each half
+/// failing is reported on its own, so UPower being down never hides a
+/// working profile switch and never reads as "this is a desktop".
+fn power_item(battery: &BatteryReading, profile: &ProfileReading) -> TrayItem {
+    let item = |icon_name: String, tooltip_title: String, tooltip_body: String| TrayItem {
+        id: POWER_ITEM_ID.to_string(),
+        category: Category::Hardware,
+        status: TrayStatus::Active,
+        title: "Power".to_string(),
+        icon_name,
+        tooltip_title,
+        tooltip_body,
+    };
+    let profile_words = match profile {
+        ProfileReading::Known { active, .. } => Some(format!("{} profile", profile_label(*active))),
+        ProfileReading::Unavailable => None,
+    };
+
+    match (battery, profile) {
+        (BatteryReading::Present(info), _) => item(
+            battery_icon(info),
+            battery_words(info),
+            // No profile sentence at all when it can't be read, rather
+            // than a guess — the menu says why.
+            profile_words.unwrap_or_default(),
+        ),
+        (BatteryReading::Absent, ProfileReading::Known { active, .. }) => item(
+            profile_icon(*active).to_string(),
+            profile_words.unwrap_or_default(),
+            "No battery".to_string(),
+        ),
+        (BatteryReading::Unavailable, ProfileReading::Known { active, .. }) => item(
+            profile_icon(*active).to_string(),
+            profile_words.unwrap_or_default(),
+            "Battery status unavailable — UPower isn't answering.".to_string(),
+        ),
+        // A desktop without power-profiles-daemon: nothing is broken
+        // about the battery, but this icon has nothing left to show.
+        (BatteryReading::Absent, ProfileReading::Unavailable) => item(
+            "dialog-warning".to_string(),
+            "Power profiles unavailable".to_string(),
+            "power-profiles-daemon isn't running.".to_string(),
+        ),
+        (BatteryReading::Unavailable, ProfileReading::Unavailable) => item(
+            "dialog-warning".to_string(),
+            "Power status unavailable".to_string(),
+            "Neither UPower nor power-profiles-daemon is answering.".to_string(),
+        ),
+    }
+}
+
+/// What the power menu should contain, from plain data — no D-Bus, no
+/// I/O.
+///
+/// There is no toggle to put at the top, so the top row is the battery
+/// reading, disabled: it is information, and the one thing people open
+/// this menu to read. The profiles are the content — one checkmark row
+/// per profile the daemon offers, the active one checked, and choosing
+/// one switches to it.
+fn power_menu(battery: &BatteryReading, profile: &ProfileReading) -> Menu {
+    let settings_row = MenuItem::standard("Power settings…", "power:settings");
+
+    let top = match battery {
+        BatteryReading::Present(info) => MenuItem::disabled(format!("Battery {}", battery_words(info))),
+        BatteryReading::Absent => MenuItem::disabled("Power profile"),
+        BatteryReading::Unavailable => MenuItem::disabled("Battery status unavailable"),
+    };
+
+    let content = match profile {
+        ProfileReading::Known { active, offered } => offered
+            .iter()
+            .map(|&p| {
+                let action = format!("power:profile:{}", p.as_str());
+                if p == *active {
+                    MenuItem::checkmark(profile_label(p), true, action)
+                } else {
+                    MenuItem::standard(profile_label(p), action)
+                }
+            })
+            .collect(),
+        ProfileReading::Unavailable => vec![MenuItem::disabled(
+            "Power profiles unavailable — power-profiles-daemon isn't running",
+        )],
+    };
+
+    radio_menu(vec![top], content, settings_row)
+}
+
 /// The typed operation behind an action string a menu click sends back.
 ///
 /// Parsed in exactly one place ([`parse_menu_action`]) so every route a
@@ -1469,6 +1742,8 @@ enum MenuAction {
     /// Sets a specific colour temperature, turning night light on if it
     /// was off.
     NightLightSet(i64),
+    /// Switches `power-profiles-daemon` to this profile.
+    PowerProfile(PowerProfile),
 }
 
 fn parse_menu_action(action: &str) -> Option<MenuAction> {
@@ -1487,6 +1762,7 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
         "keepawake:settings" => Some(MenuAction::OpenSettings("power")),
         "nightlight:off" => Some(MenuAction::NightLightOff),
         "nightlight:settings" => Some(MenuAction::OpenSettings("night-light")),
+        "power:settings" => Some(MenuAction::OpenSettings("power")),
         _ => {
             if let Some(hex) = action.strip_prefix("wifi:connect:") {
                 hex_decode(hex).map(MenuAction::WifiConnect)
@@ -1494,6 +1770,10 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
                 Some(MenuAction::BtConnect(Address::new(addr)))
             } else if let Some(addr) = action.strip_prefix("bt:disconnect:") {
                 Some(MenuAction::BtDisconnect(Address::new(addr)))
+            } else if let Some(name) = action.strip_prefix("power:profile:") {
+                // Through `PowerProfile::parse`, so a name the daemon has
+                // never offered is ignored here rather than sent to it.
+                PowerProfile::parse(name).map(MenuAction::PowerProfile)
             } else {
                 action
                     .strip_prefix("nightlight:set:")
@@ -1561,6 +1841,7 @@ async fn handle_menu_clicks(
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
     let mut power_state = Reconnecting::new();
+    let mut profiles_state = Reconnecting::new();
     while let Some(action) = actions.recv().await {
         // A menu being opened is an event, not a click, and only the
         // Wi-Fi one wants anything done about it.
@@ -1578,11 +1859,25 @@ async fn handle_menu_clicks(
             tracing::warn!(action = %action, "unknown tray menu action; ignoring");
             continue;
         };
-        if let Err(e) =
-            perform_menu_action(parsed, &mut net_state, &mut bt_state, &mut power_state, &night_light_belief)
-                .await
+        // A profile switch pulls the next poll forward, so the icon and
+        // the menu's checkmark follow the click rather than lagging it by
+        // up to a whole `POLL_INTERVAL`.
+        let refresh_after = matches!(parsed, MenuAction::PowerProfile(_));
+        match perform_menu_action(
+            parsed,
+            &mut net_state,
+            &mut bt_state,
+            &mut power_state,
+            &mut profiles_state,
+            &night_light_belief,
+        )
+        .await
         {
-            tracing::warn!(error = %e, "tray menu action failed");
+            Ok(()) if refresh_after => {
+                let _ = refresh.send(());
+            }
+            Ok(()) => {}
+            Err(e) => tracing::warn!(error = %e, "tray menu action failed"),
         }
     }
 }
@@ -1592,6 +1887,7 @@ async fn perform_menu_action(
     net_state: &mut Reconnecting<NetworkManagerBackend>,
     bt_state: &mut Reconnecting<BlueZBackend>,
     power_state: &mut Reconnecting<LogindBackend>,
+    profiles_state: &mut Reconnecting<PowerProfilesDaemonBackend>,
     night_light_belief: &NightLightBelief,
 ) -> anyhow::Result<()> {
     match action {
@@ -1684,6 +1980,13 @@ async fn perform_menu_action(
         MenuAction::NightLightSet(kelvin) => {
             tokio::task::spawn_blocking(move || Hyprsunset.set_temperature(kelvin)).await??;
             *night_light_belief.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            Ok(())
+        }
+        MenuAction::PowerProfile(profile) => {
+            let backend = profiles_backend(profiles_state)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("power-profiles-daemon unavailable"))?;
+            backend.set_active_profile(profile).await?;
             Ok(())
         }
     }
@@ -1864,6 +2167,10 @@ mod tests {
             keep_awake_item(Some(false), &[], false),
             keep_awake_item(Some(true), &[], false),
             keep_awake_item(None, &[], true),
+            power_item(&BatteryReading::Present(battery(40, BatteryState::Discharging)), &balanced()),
+            power_item(&BatteryReading::Absent, &balanced()),
+            power_item(&BatteryReading::Absent, &ProfileReading::Unavailable),
+            power_item(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
         ];
         for item in items {
             assert_eq!(item.status, TrayStatus::Active, "{} asked to be hidden", item.id);
@@ -2138,7 +2445,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, power: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -2157,12 +2464,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, menu_y_offset: 32, menu_closes_on_click_outside: true },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, menu_y_offset: 32, menu_closes_on_click_outside: true },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");
@@ -2765,6 +3072,7 @@ mod tests {
             keep_awake_menu(None, &[], true),
             night_light_menu(&NightLightState::NotRunning),
             night_light_menu(&NightLightState::CouldNotCheck),
+            power_menu(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
         ];
         for menu in menus {
             let last = menu.items.last().expect("a menu with no rows at all");
@@ -2793,6 +3101,9 @@ mod tests {
 
         let nl = night_light_menu(&NightLightState::Known { temperature: 4500, on: true });
         assert_eq!(nl.items.last().unwrap().label, "Night light settings…");
+
+        let pw = power_menu(&BatteryReading::Absent, &balanced());
+        assert_eq!(pw.items.last().unwrap().label, "Power settings…");
     }
 
     /// The settings rows for keep awake and night light are new: neither
@@ -2816,6 +3127,14 @@ mod tests {
         assert_eq!(
             parse_menu_action(nl_row.action.as_deref().unwrap()),
             Some(MenuAction::OpenSettings("night-light"))
+        );
+
+        // The power icon's row and its left click both open Power — see
+        // `TrayItem::activate_screen`.
+        let pw = power_menu(&BatteryReading::Absent, &balanced());
+        assert_eq!(
+            parse_menu_action(pw.items.last().unwrap().action.as_deref().unwrap()),
+            Some(MenuAction::OpenSettings("power"))
         );
     }
 
@@ -2843,5 +3162,192 @@ mod tests {
         let with_others_toggle =
             with_others.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
         assert_eq!(alone_toggle.id, with_others_toggle.id);
+    }
+
+    // --- power: battery and profile ------------------------------------
+
+    fn battery(percentage: u8, state: BatteryState) -> BatteryInfo {
+        BatteryInfo { percentage, state, time_to_empty: None, time_to_full: None }
+    }
+
+    fn balanced() -> ProfileReading {
+        ProfileReading::Known {
+            active: PowerProfile::Balanced,
+            offered: vec![PowerProfile::PowerSaver, PowerProfile::Balanced, PowerProfile::Performance],
+        }
+    }
+
+    /// Every name `power_item` can hand a host, checked against Breeze's
+    /// own files on this machine: eleven levels, each with and without
+    /// `-charging`, plus the charged, profile and fallback names.
+    fn power_icon_names() -> Vec<String> {
+        let mut names = Vec::new();
+        for level in (0..=100).step_by(10) {
+            names.push(format!("battery-{level:03}-symbolic"));
+            names.push(format!("battery-{level:03}-charging-symbolic"));
+        }
+        names.extend(
+            [
+                "battery-full-charged-symbolic",
+                "battery-profile-powersave-symbolic",
+                "battery-profile-balanced-symbolic",
+                "battery-profile-performance-symbolic",
+                "dialog-warning",
+            ]
+            .map(String::from),
+        );
+        names
+    }
+
+    /// Every percentage through every state, so a rounding slip that
+    /// invents `battery-105-symbolic` — or a state that forgets its
+    /// suffix — fails here rather than drawing a blank gap in the bar.
+    #[test]
+    fn every_power_icon_the_function_can_return_is_a_name_breeze_ships() {
+        let known = power_icon_names();
+        let states = [
+            BatteryState::Charging,
+            BatteryState::Discharging,
+            BatteryState::Empty,
+            BatteryState::FullyCharged,
+            BatteryState::PendingCharge,
+            BatteryState::PendingDischarge,
+            BatteryState::Unknown,
+        ];
+        let profiles = [
+            ProfileReading::Unavailable,
+            ProfileReading::Known { active: PowerProfile::PowerSaver, offered: vec![] },
+            ProfileReading::Known { active: PowerProfile::Balanced, offered: vec![] },
+            ProfileReading::Known { active: PowerProfile::Performance, offered: vec![] },
+        ];
+        let mut readings = vec![BatteryReading::Absent, BatteryReading::Unavailable];
+        for pct in 0..=100 {
+            for state in states {
+                readings.push(BatteryReading::Present(battery(pct, state)));
+            }
+        }
+        for reading in &readings {
+            for profile in &profiles {
+                let icon = power_item(reading, profile).icon_name;
+                assert!(known.contains(&icon), "{icon:?} is not a name this daemon may emit");
+            }
+        }
+    }
+
+    /// Nearest ten, not rounded down: 9% is not an empty battery.
+    #[test]
+    fn the_battery_level_rounds_to_the_nearest_icon_step() {
+        let icon = |pct| battery_icon(&battery(pct, BatteryState::Discharging));
+        assert_eq!(icon(0), "battery-000-symbolic");
+        assert_eq!(icon(4), "battery-000-symbolic");
+        assert_eq!(icon(5), "battery-010-symbolic");
+        assert_eq!(icon(9), "battery-010-symbolic");
+        assert_eq!(icon(94), "battery-090-symbolic");
+        assert_eq!(icon(95), "battery-100-symbolic");
+        assert_eq!(icon(100), "battery-100-symbolic");
+    }
+
+    #[test]
+    fn a_charging_battery_draws_the_plug_and_a_full_one_its_own_icon() {
+        assert_eq!(
+            battery_icon(&battery(62, BatteryState::Charging)),
+            "battery-060-charging-symbolic"
+        );
+        assert_eq!(
+            battery_icon(&battery(62, BatteryState::PendingCharge)),
+            "battery-060-charging-symbolic"
+        );
+        assert_eq!(
+            battery_icon(&battery(100, BatteryState::FullyCharged)),
+            "battery-full-charged-symbolic"
+        );
+    }
+
+    /// A desktop has no battery, and that is not a failure: the icon
+    /// shows the profile, and nothing in it reads as a warning.
+    #[test]
+    fn a_machine_with_no_battery_shows_its_power_profile_not_a_warning() {
+        let item = power_item(&BatteryReading::Absent, &balanced());
+        assert_eq!(item.icon_name, "battery-profile-balanced-symbolic");
+        assert_eq!(item.tooltip_title, "Balanced profile");
+        assert_eq!(item.tooltip_body, "No battery");
+    }
+
+    /// UPower being down must neither hide a working profile switch nor
+    /// read as "this machine has no battery" — the two failures this
+    /// daemon keeps apart everywhere else.
+    #[test]
+    fn upower_being_down_keeps_the_profile_and_does_not_claim_there_is_no_battery() {
+        let item = power_item(&BatteryReading::Unavailable, &balanced());
+        assert_eq!(item.icon_name, "battery-profile-balanced-symbolic");
+        assert!(item.tooltip_body.contains("UPower"), "{}", item.tooltip_body);
+        assert!(!item.tooltip_body.contains("No battery"));
+
+        let menu = power_menu(&BatteryReading::Unavailable, &balanced());
+        assert_eq!(menu.items[0].label, "Battery status unavailable");
+        assert!(menu.items.iter().any(|i| i.label == "Balanced" && i.action.is_some()));
+    }
+
+    /// And the other way round: the battery still reads when the profile
+    /// daemon is down, and the menu says why there are no profiles.
+    #[test]
+    fn the_profile_daemon_being_down_keeps_the_battery_and_says_why_profiles_are_missing() {
+        let reading = BatteryReading::Present(BatteryInfo {
+            time_to_empty: Some(Duration::from_secs(92 * 60)),
+            ..battery(73, BatteryState::Discharging)
+        });
+        let item = power_item(&reading, &ProfileReading::Unavailable);
+        assert_eq!(item.icon_name, "battery-070-symbolic");
+        assert_eq!(item.tooltip_title, "73% — 1h 32m left");
+        assert_eq!(item.tooltip_body, "", "no profile claimed when it could not be read");
+
+        let menu = power_menu(&reading, &ProfileReading::Unavailable);
+        assert_eq!(menu.items[0].label, "Battery 73% — 1h 32m left");
+        assert!(!menu.items[0].enabled, "the battery row is information, not a control");
+        assert!(menu
+            .items
+            .iter()
+            .any(|i| i.label.contains("power-profiles-daemon isn't running") && !i.enabled));
+    }
+
+    /// Only what the daemon offers is listed, the active one is the one
+    /// checked, and each row's action switches to exactly that profile.
+    #[test]
+    fn the_profile_rows_are_what_the_daemon_offers_with_the_active_one_checked() {
+        let profile = ProfileReading::Known {
+            active: PowerProfile::PowerSaver,
+            offered: vec![PowerProfile::PowerSaver, PowerProfile::Balanced],
+        };
+        let menu = power_menu(&BatteryReading::Absent, &profile);
+        let rows: Vec<_> = menu
+            .items
+            .iter()
+            .filter(|i| i.action.as_deref().is_some_and(|a| a.starts_with("power:profile:")))
+            .collect();
+        assert_eq!(rows.len(), 2, "Performance was not offered and must not be listed");
+        assert_eq!(rows[0].label, "Power saver");
+        assert_eq!((rows[0].kind, rows[0].toggle), (ItemKind::Checkmark, Some(true)));
+        assert_eq!(rows[1].label, "Balanced");
+        assert_eq!(
+            parse_menu_action(rows[1].action.as_deref().unwrap()),
+            Some(MenuAction::PowerProfile(PowerProfile::Balanced))
+        );
+    }
+
+    #[test]
+    fn a_profile_name_the_daemon_never_defined_is_ignored_rather_than_sent() {
+        assert_eq!(parse_menu_action("power:profile:turbo"), None);
+        assert_eq!(parse_menu_action("power:profile:"), None);
+    }
+
+    /// "Plugged in, not charging" is neither of the two things people
+    /// would otherwise be told, and both of those send them to check the
+    /// cable.
+    #[test]
+    fn a_battery_held_below_full_on_mains_says_so() {
+        assert_eq!(
+            battery_words(&battery(80, BatteryState::PendingCharge)),
+            "80% — plugged in, not charging"
+        );
     }
 }

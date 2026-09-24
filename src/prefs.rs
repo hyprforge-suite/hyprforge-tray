@@ -41,6 +41,9 @@ pub struct Prefs {
     pub bluetooth: bool,
     pub keep_awake: bool,
     pub night_light: bool,
+    /// Battery level and power profile, one icon — off by default for
+    /// the reason `keep_awake` and `night_light` are.
+    pub power: bool,
     /// Logical pixels added to a click's own Y position before the tray
     /// menu opens there — see this module's own doc. `32` clears a
     /// waybar-height bar (that bar defaults to about 34px tall) without
@@ -68,6 +71,7 @@ impl Default for Prefs {
             bluetooth: true,
             keep_awake: false,
             night_light: false,
+            power: false,
             menu_y_offset: 32,
             menu_closes_on_click_outside: true,
         }
@@ -239,6 +243,7 @@ mod tests {
             bluetooth: true,
             keep_awake: true,
             night_light: true,
+            power: true,
             menu_y_offset: 50,
             menu_closes_on_click_outside: false,
         };
@@ -275,6 +280,7 @@ mod tests {
         assert!(!prefs.bluetooth);
         assert!(!prefs.keep_awake, "an icon added later than this file defaults off");
         assert!(!prefs.night_light, "an icon added later than this file defaults off");
+        assert!(!prefs.power, "an icon added later than this file defaults off");
     }
 
     /// A `tray.toml` written before `menu_y_offset` existed must still

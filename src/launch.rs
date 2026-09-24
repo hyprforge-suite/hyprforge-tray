@@ -70,7 +70,7 @@ pub struct OpenMenu(Mutex<Option<(u32, Child)>>);
 
 /// The slot [`show`] uses. Process-wide because what it models is: there
 /// is one `hyprforge-traymenu` lock per session, so there is one open
-/// menu per daemon, whichever of the four items was clicked. It is a
+/// menu per daemon, whichever item was clicked. It is a
 /// parameter of [`show_with_binary`] rather than reached for directly,
 /// so tests get their own slot instead of racing each other through
 /// this one.

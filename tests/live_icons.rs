@@ -88,6 +88,9 @@ const EVERY_ICON: &[&str] = &[
     "battery-profile-powersave-symbolic",
     "battery-profile-balanced-symbolic",
     "battery-profile-performance-symbolic",
+    // Displays: normal, and a layout waiting to be kept.
+    "monitor-symbolic",
+    "preferences-desktop-display-randr-symbolic",
     // Shared fallbacks. These two are the one deliberate exception to
     // "every name is symbolic" (see `SHARED_FALLBACK_ICONS` below): they
     // are the identical error state on every item, not one item's

@@ -44,6 +44,10 @@ pub struct Prefs {
     /// Battery level and power profile, one icon — off by default for
     /// the reason `keep_awake` and `night_light` are.
     pub power: bool,
+    /// Saved display layouts, and the keep-or-revert prompt after
+    /// switching one. Off by default like the others added after the
+    /// first two.
+    pub displays: bool,
     /// Logical pixels added to a click's own Y position before the tray
     /// menu opens there — see this module's own doc. `32` clears a
     /// waybar-height bar (that bar defaults to about 34px tall) without
@@ -72,6 +76,7 @@ impl Default for Prefs {
             keep_awake: false,
             night_light: false,
             power: false,
+            displays: false,
             menu_y_offset: 32,
             menu_closes_on_click_outside: true,
         }
@@ -244,6 +249,7 @@ mod tests {
             keep_awake: true,
             night_light: true,
             power: true,
+            displays: true,
             menu_y_offset: 50,
             menu_closes_on_click_outside: false,
         };
@@ -281,6 +287,7 @@ mod tests {
         assert!(!prefs.keep_awake, "an icon added later than this file defaults off");
         assert!(!prefs.night_light, "an icon added later than this file defaults off");
         assert!(!prefs.power, "an icon added later than this file defaults off");
+        assert!(!prefs.displays, "an icon added later than this file defaults off");
     }
 
     /// A `tray.toml` written before `menu_y_offset` existed must still

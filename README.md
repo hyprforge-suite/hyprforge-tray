@@ -2,7 +2,8 @@
 
 A tray icon library over `org.kde.StatusNotifierItem`, plus
 `hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake,
-night-light and battery/power-profile icons in whatever bar is running,
+night-light, battery/power-profile and display-layout icons in whatever
+bar is running,
 and `hyprforge-traymenu`, which draws their right-click menus.
 
 Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
@@ -36,7 +37,8 @@ them in.
   `hyprforge-power` (keep awake, over `systemd-logind`; battery and
   power profile, over UPower and `power-profiles-daemon`) and
   `hyprforge-ecosystem::sunset_control` (night light, over
-  `hyprctl hyprsunset`), and forwards a click to
+  `hyprctl hyprsunset`) and `hyprforge-displayd` (display layouts, over
+  its own D-Bus interface), and forwards a click to
   `hyprforge-settings --screen <name>`.
 - **`hyprforge-traymenu`** (`src/bin/traymenu/`) — the popup that draws
   an item's right-click menu.
@@ -51,7 +53,8 @@ behind a `mock` feature — none of that lives in this crate, it is what
 deliberately structured the same way: which icon a given state
 deserves, and which rows a menu needs, are plain functions over plain
 data (`network_item`, `bluetooth_item`, `keep_awake_item`,
-`night_light_item`, `power_item` and their `*_menu` counterparts in `trayd.rs`, and
+`night_light_item`, `power_item`, `displays_item` and their `*_menu`
+counterparts in `trayd.rs`, and
 the pure model in `src/item.rs` / `src/menu.rs`) — no D-Bus, no bar, no
 radio, so the interesting question is testable without any of the
 three. Everything else in `trayd.rs` is plumbing: polling the

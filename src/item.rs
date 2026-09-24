@@ -106,6 +106,7 @@ impl TrayItem {
             // The battery and profile icon opens the same Power screen,
             // which shows both.
             "hyprforge-power" => Some("power"),
+            "hyprforge-displays" => Some("displays"),
             // An id nothing claims falls through to `None`.
             _ => None,
         }
@@ -167,6 +168,7 @@ mod tests {
         );
         assert_eq!(item("hyprforge-keep-awake").activate_screen(), Some("power"));
         assert_eq!(item("hyprforge-power").activate_screen(), Some("power"));
+        assert_eq!(item("hyprforge-displays").activate_screen(), Some("displays"));
         // An id nothing claims still resolves to nothing, rather than to
         // whichever arm happens to be last.
         assert_eq!(item("hyprforge-nonsense").activate_screen(), None);

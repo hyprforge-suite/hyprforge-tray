@@ -10,7 +10,7 @@ license = "MIT"
 # here too, or this description would be exactly the stale claim
 # CLAUDE.md's rule about a comment describing behaviour that no longer
 # exists warns against — just in a manifest instead of a doc comment.
-description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake, night-light and battery/power-profile icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
+description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
 repository = "https://github.com/adamrpostjr/hyprforge"
 documentation = "https://docs.rs/hyprforge-tray"
 readme = "README.md"
@@ -58,6 +58,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
 anyhow = "1"
+# `StreamExt::next`, for displayd's revert signals.
+futures-util = "0.3"
 
 # Named as git dependencies, not versions, because the owner has not
 # published to crates.io yet: this manifest has to work unchanged both
@@ -79,6 +81,12 @@ hyprforge-bluetooth = { git = "https://github.com/adamrpostjr/hyprforge" }
 # Keep awake (systemd-logind) and night light (hyprsunset via hyprctl) —
 # same "binary-only" arrangement as network/bluetooth above.
 hyprforge-power = { git = "https://github.com/adamrpostjr/hyprforge" }
+# For `displayd_proxy` alone, the one definition of displayd's D-Bus
+# contract — the Settings app and displayctl speak through it, and a
+# third copy here is how the three would drift. `default-features =
+# false` because the rest of hyprforge-core is Hyprland config
+# machinery this daemon has no use for.
+hyprforge-core = { git = "https://github.com/adamrpostjr/hyprforge", default-features = false, features = ["dbus"] }
 hyprforge-ecosystem = { git = "https://github.com/adamrpostjr/hyprforge" }
 
 # Used only by the `hyprforge-traymenu` binary: the shared layer-shell

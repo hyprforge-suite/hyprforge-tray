@@ -104,16 +104,23 @@ jobs:
         # that file pins, rather than whatever `stable` resolves to on
         # the day the job happens to run.
         #
-        # No apt-get step here: `cargo tree -p hyprforge-tray --edges
-        # normal,build` shows the only `*-sys` crate in this crate's
-        # graph is `linux-raw-sys`, which is rustix's pure-Rust syscall
-        # backend on Linux — it links nothing. Nothing else in this
-        # crate's dependency tree (zbus, tokio, the four Hyprforge
-        # backends it joins) has a build.rs that links a system library.
+        # System libraries are the next step's business, not this one's.
         run: rustup show
 
       - name: Cache the cargo registry and build output
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install native dependencies
+        # hyprforge-popup's smithay-client-toolkit links libxkbcommon, and
+        # its Wayland client links libwayland — confirmed with `cargo tree
+        # -e features -i`, not assumed. The popup came in when the tray's
+        # right-click menu moved into the tray crate as a second binary;
+        # until this step existed, every run from that commit on failed
+        # in smithay-client-toolkit's build script, before any of this
+        # repository's code compiled.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libxkbcommon-dev libwayland-dev
 
       - name: cargo build
         run: cargo build --all-targets

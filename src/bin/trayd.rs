@@ -1,5 +1,6 @@
-//! `hyprforge-trayd`: six `org.kde.StatusNotifierItem`s — Wi-Fi and
-//! Bluetooth joined to `hyprforge-network` and `hyprforge-bluetooth`,
+//! `hyprforge-trayd`: six `org.kde.StatusNotifierItem`s — network (Wi-Fi
+//! and Ethernet in one icon) and Bluetooth, joined to `hyprforge-network`
+//! and `hyprforge-bluetooth`,
 //! keep-awake (`hyprforge-power`, over `systemd-logind`), night light
 //! (`hyprforge-ecosystem::sunset_control`, over `hyprctl hyprsunset`),
 //! battery and power profile (`hyprforge-power` again, over UPower and
@@ -53,7 +54,9 @@ use futures_util::StreamExt;
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_ecosystem::sunset_control::{Hyprsunset, SunsetBackend, SunsetControlError};
 use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend, SavedNetwork};
-use hyprforge_network::{AccessPoint, NetworkManagerBackend, RadioState, Ssid};
+use hyprforge_network::{
+    AccessPoint, NetworkError, NetworkManagerBackend, RadioState, Ssid, WiredState, WiredStatus,
+};
 use hyprforge_network::Status as NetStatus;
 use hyprforge_power::{
     BatteryBackend, BatteryInfo, BatteryState, InhibitBackend, InhibitorInfo, LogindBackend,
@@ -454,7 +457,16 @@ async fn sample_network(state: &mut Reconnecting<NetworkManagerBackend>) -> (Tra
             // scan; that is not "unavailable", just "nothing read this
             // tick" — an empty list here still lets the item and menu
             // render, just without a signal reading or any other rows.
-            let points = backend.access_points().await.unwrap_or_default();
+            // `NoWifiDevice` is the one failure that means something: a
+            // machine with no Wi-Fi at all, whose icon is the wire's.
+            let (points, wifi_present) = match backend.access_points().await {
+                Ok(points) => (points, true),
+                Err(NetworkError::NoWifiDevice) => (Vec::new(), false),
+                Err(_) => (Vec::new(), true),
+            };
+            // Likewise a failed wired read degrades to "no wired rows
+            // this tick", never to the whole icon going unavailable.
+            let wired = backend.wired().await.unwrap_or_default();
             let strength = status
                 .connected_to
                 .as_ref()
@@ -463,9 +475,18 @@ async fn sample_network(state: &mut Reconnecting<NetworkManagerBackend>) -> (Tra
             // otherwise-fine menu disappear, only omit the "already
             // saved" distinction for this tick.
             let saved = backend.saved_networks().await.unwrap_or_default();
-            let item = network_item(Some(&status), status.connected_to.as_ref(), strength, false);
-            let menu =
-                network_menu(Some(&status), status.connected_to.as_ref(), false, &points, &saved);
+            let item = with_wired(
+                network_item(Some(&status), status.connected_to.as_ref(), strength, false),
+                status.connected_to.as_ref(),
+                &wired,
+                wifi_present,
+            );
+            let menu = with_wired_menu(
+                network_menu(Some(&status), status.connected_to.as_ref(), false, &points, &saved),
+                &wired,
+                wifi_present,
+                false,
+            );
             (item, menu)
         }
         Err(e) => {
@@ -1121,7 +1142,9 @@ fn network_item(
     unavailable: bool,
 ) -> TrayItem {
     let id = NETWORK_ITEM_ID.to_string();
-    let title = "Wi-Fi".to_string();
+    // "Network", not "Wi-Fi": this one icon covers Ethernet too — see
+    // `with_wired`.
+    let title = "Network".to_string();
 
     let Some(status) = status.filter(|_| !unavailable) else {
         return TrayItem {
@@ -1134,7 +1157,7 @@ fn network_item(
             status: TrayStatus::Active,
             title,
             icon_name: "dialog-warning".to_string(),
-            tooltip_title: "Wi-Fi unavailable".to_string(),
+            tooltip_title: "Network unavailable".to_string(),
             tooltip_body: "NetworkManager isn't running.".to_string(),
         };
     };
@@ -1336,7 +1359,7 @@ fn network_menu(
     let settings_row = MenuItem::standard("Network settings…", "wifi:settings");
 
     let Some(status) = status.filter(|_| !unavailable) else {
-        return radio_menu(vec![MenuItem::disabled("Wi-Fi unavailable")], Vec::new(), settings_row);
+        return radio_menu(vec![MenuItem::disabled("Network unavailable")], Vec::new(), settings_row);
     };
 
     let top = match status.radio {
@@ -1395,6 +1418,147 @@ fn network_menu(
     }
 
     radio_menu(top, content, settings_row)
+}
+
+/// How a wired interface is named in a row: plainly "Wired" when it is
+/// the only one, and with its interface name when there are several, so
+/// a laptop's port and a dock's can be told apart.
+fn wired_label(port: &WiredStatus, several: bool) -> String {
+    if several {
+        format!("Wired ({})", port.interface)
+    } else {
+        "Wired".to_string()
+    }
+}
+
+/// The network icon, given what the Wi-Fi half already decided.
+///
+/// A connected cable outranks Wi-Fi, because NetworkManager routes over it
+/// ahead of Wi-Fi (its default metrics put Ethernet at 100 and Wi-Fi at
+/// 600): the icon should name the link traffic actually uses. Otherwise
+/// Wi-Fi's own icon stands — unless this machine has no Wi-Fi hardware at
+/// all, where a Wi-Fi icon saying "not connected" would describe a radio
+/// that is not there, and the icon is the wire's instead.
+fn with_wired(
+    wifi: TrayItem,
+    connected_ssid: Option<&Ssid>,
+    wired: &[WiredStatus],
+    wifi_present: bool,
+) -> TrayItem {
+    let several = wired.len() > 1;
+    let wired_item = |icon: &str, tooltip_title: String, tooltip_body: String| TrayItem {
+        icon_name: icon.to_string(),
+        tooltip_title,
+        tooltip_body,
+        ..wifi.clone()
+    };
+
+    if let Some(port) = wired.iter().find(|p| p.state == WiredState::Connected) {
+        let mut body: Vec<String> = Vec::new();
+        if several {
+            body.push(port.interface.clone());
+        }
+        if let Some(speed) = port.speed_mbps {
+            body.push(format!("{speed} Mb/s"));
+        }
+        if let Some(ssid) = connected_ssid {
+            body.push(format!("also on Wi-Fi ({})", ssid.to_display_string()));
+        }
+        return wired_item(
+            "network-wired-activated-symbolic",
+            match &port.connection {
+                Some(name) => format!("Wired — {name}"),
+                None => "Wired".to_string(),
+            },
+            body.join(" · "),
+        );
+    }
+    // Wi-Fi connected while a cable is still getting an address: Wi-Fi is
+    // what works right now, so it keeps the icon until the wire is up.
+    if connected_ssid.is_none() {
+        if let Some(port) = wired.iter().find(|p| p.state == WiredState::Connecting) {
+            return wired_item(
+                "network-wired-symbolic",
+                format!("{} — connecting…", wired_label(port, several)),
+                String::new(),
+            );
+        }
+    }
+    if wifi_present {
+        return wifi;
+    }
+    match wired.iter().find(|p| p.state == WiredState::Disconnected) {
+        Some(port) => wired_item(
+            "network-wired-disconnected-symbolic",
+            "Not connected".to_string(),
+            format!("{} has a cable, but no connection is active", wired_label(port, several)),
+        ),
+        None if wired.is_empty() => wired_item(
+            "network-wired-unavailable-symbolic",
+            "No network devices".to_string(),
+            "NetworkManager sees no Wi-Fi or Ethernet here.".to_string(),
+        ),
+        None => wired_item(
+            "network-wired-unavailable-symbolic",
+            "Cable unplugged".to_string(),
+            String::new(),
+        ),
+    }
+}
+
+/// The network menu, given the Wi-Fi half already built.
+///
+/// Wired interfaces come first, above the Wi-Fi toggle and in a section
+/// of their own, because the toggle governs only the radio and a cable
+/// listed under it would read as switched by it. A connected port is a
+/// checkmark that disconnects it; a port with a cable and nothing active
+/// is a row that connects it; an unplugged one is information, since no
+/// menu can plug a cable in. With no Wi-Fi hardware the Wi-Fi half is
+/// dropped entirely rather than offering a radio toggle for a radio that
+/// is not there.
+fn with_wired_menu(wifi: Menu, wired: &[WiredStatus], wifi_present: bool, unavailable: bool) -> Menu {
+    if unavailable {
+        return wifi;
+    }
+    let several = wired.len() > 1;
+    let rows: Vec<MenuItem> = wired
+        .iter()
+        .map(|port| {
+            let label = wired_label(port, several);
+            match port.state {
+                WiredState::Connected => MenuItem::checkmark(
+                    match &port.connection {
+                        Some(name) => format!("{label} — {name}"),
+                        None => label,
+                    },
+                    true,
+                    format!("wired:disconnect:{}", port.interface),
+                ),
+                WiredState::Connecting => MenuItem::disabled(format!("{label} — connecting…")),
+                WiredState::Disconnected => {
+                    MenuItem::standard(label, format!("wired:connect:{}", port.interface))
+                }
+                WiredState::CableUnplugged => MenuItem::disabled(format!("{label} — cable unplugged")),
+            }
+        })
+        .collect();
+
+    if !wifi_present {
+        let settings_row = MenuItem::standard("Network settings…", "wifi:settings");
+        let top = if rows.is_empty() {
+            vec![MenuItem::disabled("No network devices")]
+        } else {
+            rows
+        };
+        return radio_menu(top, Vec::new(), settings_row);
+    }
+    if rows.is_empty() {
+        return wifi;
+    }
+    let mut items = rows;
+    items.push(MenuItem::separator());
+    items.extend(wifi.items);
+    Menu::new(items)
 }
 
 /// What the Bluetooth menu should contain, from plain data — no D-Bus, no
@@ -2092,10 +2256,23 @@ enum MenuAction {
     NightLightSet(i64),
     /// Switches `power-profiles-daemon` to this profile.
     PowerProfile(PowerProfile),
+    /// Brings a wired interface up, by its interface name.
+    WiredConnect(String),
+    WiredDisconnect(String),
     /// Applies a saved display layout, reversibly.
     DisplayApply(String),
     DisplayKeep,
     DisplayRevert,
+}
+
+/// A Linux interface name, as far as an action string can carry one:
+/// non-empty, at most the kernel's fifteen bytes, no whitespace and no
+/// `/` — the characters the kernel itself refuses.
+fn interface_name(name: &str) -> Option<String> {
+    let valid = !name.is_empty()
+        && name.len() <= 15
+        && !name.bytes().any(|b| b == b'/' || b.is_ascii_whitespace());
+    valid.then(|| name.to_string())
 }
 
 fn parse_menu_action(action: &str) -> Option<MenuAction> {
@@ -2125,6 +2302,10 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
                 Some(MenuAction::BtConnect(Address::new(addr)))
             } else if let Some(addr) = action.strip_prefix("bt:disconnect:") {
                 Some(MenuAction::BtDisconnect(Address::new(addr)))
+            } else if let Some(interface) = action.strip_prefix("wired:connect:") {
+                interface_name(interface).map(MenuAction::WiredConnect)
+            } else if let Some(interface) = action.strip_prefix("wired:disconnect:") {
+                interface_name(interface).map(MenuAction::WiredDisconnect)
             } else if let Some(id) = action.strip_prefix("display:apply:") {
                 // A profile id is a blake3 hex digest. Anything else did
                 // not come from a menu this daemon built.
@@ -2238,7 +2419,10 @@ async fn handle_menu_clicks(
         // up to a whole `POLL_INTERVAL`.
         // Display actions refresh on their own, through the revert
         // deadline — see `set_revert_deadline`.
-        let refresh_after = matches!(parsed, MenuAction::PowerProfile(_));
+        let refresh_after = matches!(
+            parsed,
+            MenuAction::PowerProfile(_) | MenuAction::WiredConnect(_) | MenuAction::WiredDisconnect(_)
+        );
         match perform_menu_action(parsed, &mut state, &night_light_belief, &revert_deadline, &refresh)
             .await
         {
@@ -2357,6 +2541,20 @@ async fn perform_menu_action(
             backend.set_active_profile(profile).await?;
             Ok(())
         }
+        MenuAction::WiredConnect(interface) => {
+            let backend = network_backend(&mut state.net)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
+            backend.wired_connect(&interface).await?;
+            Ok(())
+        }
+        MenuAction::WiredDisconnect(interface) => {
+            let backend = network_backend(&mut state.net)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("NetworkManager unavailable"))?;
+            backend.wired_disconnect(&interface).await?;
+            Ok(())
+        }
         MenuAction::DisplayApply(id) => {
             let conn = session_bus(&mut state.bus)
                 .await
@@ -2431,6 +2629,10 @@ mod tests {
         "network-wireless-signal-weak-symbolic",
         "network-wireless-signal-none-symbolic",
         "network-wireless-disconnected-symbolic",
+        "network-wired-activated-symbolic",
+        "network-wired-symbolic",
+        "network-wired-disconnected-symbolic",
+        "network-wired-unavailable-symbolic",
         "dialog-warning",
     ];
     const BLUETOOTH_ICON_NAMES: &[&str] = &[
@@ -3914,5 +4116,177 @@ mod tests {
             .collect();
         let menu = displays_menu(&DisplaysReading::Known { profiles, current: None }, false);
         assert!(menu.items.iter().any(|i| i.label == "+2 more — see Settings"));
+    }
+
+    // --- wired ---------------------------------------------------------
+
+    fn wired(interface: &str, state: WiredState, connection: Option<&str>) -> WiredStatus {
+        WiredStatus {
+            interface: interface.to_string(),
+            state,
+            connection: connection.map(str::to_string),
+            speed_mbps: (state == WiredState::Connected).then_some(1000),
+        }
+    }
+
+    fn wifi_on(ssid: Option<&str>) -> (TrayItem, Option<Ssid>) {
+        let connected = ssid.map(Ssid::new);
+        let status = net_status(RadioState::On, ssid);
+        (network_item(Some(&status), connected.as_ref(), Some(80), false), connected)
+    }
+
+    #[test]
+    fn every_wired_icon_the_function_can_return_is_in_the_allowed_set() {
+        let states = [
+            WiredState::Connected,
+            WiredState::Connecting,
+            WiredState::Disconnected,
+            WiredState::CableUnplugged,
+        ];
+        for ssid in [None, Some("home")] {
+            for wifi_present in [false, true] {
+                let mut cases: Vec<Vec<WiredStatus>> = vec![vec![]];
+                cases.extend(states.iter().map(|&s| vec![wired("enp3s0", s, Some("LAN"))]));
+                for ports in cases {
+                    let (item, connected) = wifi_on(ssid);
+                    let icon = with_wired(item, connected.as_ref(), &ports, wifi_present).icon_name;
+                    assert!(NETWORK_ICON_NAMES.contains(&icon.as_str()), "{icon:?}");
+                }
+            }
+        }
+    }
+
+    /// NetworkManager routes over the cable ahead of Wi-Fi, so the icon
+    /// names the cable — and still says Wi-Fi is up too.
+    #[test]
+    fn a_connected_cable_outranks_wifi_and_says_wifi_is_up_too() {
+        let (item, connected) = wifi_on(Some("home"));
+        let item = with_wired(
+            item,
+            connected.as_ref(),
+            &[wired("enp3s0", WiredState::Connected, Some("Home LAN"))],
+            true,
+        );
+        assert_eq!(item.icon_name, "network-wired-activated-symbolic");
+        assert_eq!(item.tooltip_title, "Wired — Home LAN");
+        assert_eq!(item.tooltip_body, "1000 Mb/s · also on Wi-Fi (home)");
+        assert_eq!(item.title, "Network");
+    }
+
+    /// Wi-Fi that works keeps the icon while a cable is still getting an
+    /// address, rather than showing a link that isn't up yet.
+    #[test]
+    fn wifi_keeps_the_icon_while_a_cable_is_still_connecting() {
+        let (item, connected) = wifi_on(Some("home"));
+        let wifi_icon = item.icon_name.clone();
+        let item = with_wired(
+            item,
+            connected.as_ref(),
+            &[wired("enp3s0", WiredState::Connecting, None)],
+            true,
+        );
+        assert_eq!(item.icon_name, wifi_icon);
+    }
+
+    /// A machine with no Wi-Fi hardware must not show a Wi-Fi icon saying
+    /// "not connected" about a radio that isn't there.
+    #[test]
+    fn with_no_wifi_hardware_the_icon_is_the_wires_not_a_missing_radios() {
+        let (item, _) = wifi_on(None);
+        let unplugged = with_wired(
+            item.clone(),
+            None,
+            &[wired("enp3s0", WiredState::CableUnplugged, None)],
+            false,
+        );
+        assert_eq!(unplugged.icon_name, "network-wired-unavailable-symbolic");
+        assert_eq!(unplugged.tooltip_title, "Cable unplugged");
+
+        let idle = with_wired(item, None, &[wired("enp3s0", WiredState::Disconnected, None)], false);
+        assert_eq!(idle.icon_name, "network-wired-disconnected-symbolic");
+        assert_ne!(idle.icon_name, unplugged.icon_name, "plugged-in-idle and unplugged look different");
+    }
+
+    /// With Wi-Fi hardware and no cable story to tell, the Wi-Fi icon
+    /// stands exactly as it was.
+    #[test]
+    fn an_unplugged_cable_does_not_displace_wifi() {
+        let (item, connected) = wifi_on(Some("home"));
+        let before = item.clone();
+        let after = with_wired(
+            item,
+            connected.as_ref(),
+            &[wired("enp3s0", WiredState::CableUnplugged, None)],
+            true,
+        );
+        assert_eq!(after, before);
+    }
+
+    fn menu_with(ports: &[WiredStatus], wifi_present: bool) -> Menu {
+        let status = net_status(RadioState::On, None);
+        with_wired_menu(network_menu(Some(&status), None, false, &[], &[]), ports, wifi_present, false)
+    }
+
+    /// Wired rows sit above the Wi-Fi toggle in their own section, so
+    /// they can't be read as governed by it.
+    #[test]
+    fn wired_rows_come_first_in_a_section_of_their_own() {
+        let menu = menu_with(&[wired("enp3s0", WiredState::Connected, Some("Home LAN"))], true);
+        assert_eq!(menu.items[0].label, "Wired — Home LAN");
+        assert_eq!((menu.items[0].kind, menu.items[0].toggle), (ItemKind::Checkmark, Some(true)));
+        assert_eq!(menu.items[1].kind, ItemKind::Separator);
+        assert_eq!(menu.items[2].label, "Wi-Fi");
+        assert_eq!(
+            parse_menu_action(menu.items[0].action.as_deref().unwrap()),
+            Some(MenuAction::WiredDisconnect("enp3s0".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_plugged_in_idle_port_offers_to_connect_and_an_unplugged_one_only_says_so() {
+        let menu = menu_with(
+            &[
+                wired("enp3s0", WiredState::Disconnected, None),
+                wired("enx0011", WiredState::CableUnplugged, None),
+            ],
+            true,
+        );
+        assert_eq!(menu.items[0].label, "Wired (enp3s0)", "several ports are told apart by name");
+        assert_eq!(
+            parse_menu_action(menu.items[0].action.as_deref().unwrap()),
+            Some(MenuAction::WiredConnect("enp3s0".to_string()))
+        );
+        assert_eq!(menu.items[1].label, "Wired (enx0011) — cable unplugged");
+        assert!(!menu.items[1].enabled);
+    }
+
+    /// No Wi-Fi hardware: no Wi-Fi toggle for a radio that isn't there.
+    #[test]
+    fn with_no_wifi_hardware_the_menu_offers_no_wifi_toggle() {
+        let menu = menu_with(&[wired("enp3s0", WiredState::Connected, Some("LAN"))], false);
+        assert!(!menu.items.iter().any(|i| i.label == "Wi-Fi"), "{:?}", menu.items);
+        assert_eq!(menu.items.last().unwrap().label, "Network settings…");
+
+        let bare = menu_with(&[], false);
+        assert_eq!(bare.items[0].label, "No network devices");
+    }
+
+    #[test]
+    fn with_no_wired_ports_the_wifi_menu_is_unchanged() {
+        let status = net_status(RadioState::On, None);
+        let wifi = network_menu(Some(&status), None, false, &[], &[]);
+        assert_eq!(with_wired_menu(wifi.clone(), &[], true, false), wifi);
+    }
+
+    #[test]
+    fn an_interface_name_the_kernel_would_refuse_is_ignored() {
+        assert_eq!(parse_menu_action("wired:connect:"), None);
+        assert_eq!(parse_menu_action("wired:connect:en p3s0"), None);
+        assert_eq!(parse_menu_action("wired:connect:../eth0"), None);
+        assert_eq!(parse_menu_action("wired:connect:abcdefghijklmnop"), None, "sixteen bytes");
+        assert_eq!(
+            parse_menu_action("wired:connect:enp197s0f4u1"),
+            Some(MenuAction::WiredConnect("enp197s0f4u1".to_string()))
+        );
     }
 }

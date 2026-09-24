@@ -1,10 +1,10 @@
 # hyprforge-tray
 
 A tray icon library over `org.kde.StatusNotifierItem`, plus
-`hyprforge-trayd`, the daemon that puts Wi-Fi, Bluetooth, keep-awake,
-night-light, battery/power-profile and display-layout icons in whatever
-bar is running,
-and `hyprforge-traymenu`, which draws their right-click menus.
+`hyprforge-trayd`, the daemon that puts network (Wi-Fi and Ethernet),
+Bluetooth, keep-awake, night-light, battery/power-profile and
+display-layout icons in whatever bar is running, and
+`hyprforge-traymenu`, which draws their right-click menus.
 
 Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone. Installing this gets

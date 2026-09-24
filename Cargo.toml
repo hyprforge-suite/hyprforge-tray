@@ -10,7 +10,7 @@ license = "MIT"
 # here too, or this description would be exactly the stale claim
 # CLAUDE.md's rule about a comment describing behaviour that no longer
 # exists warns against — just in a manifest instead of a doc comment.
-description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts Wi-Fi, Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
+description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
 repository = "https://github.com/adamrpostjr/hyprforge"
 documentation = "https://docs.rs/hyprforge-tray"
 readme = "README.md"

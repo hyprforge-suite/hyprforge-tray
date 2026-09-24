@@ -48,6 +48,11 @@ const EVERY_ICON: &[&str] = &[
     "network-wireless-signal-weak-symbolic",
     "network-wireless-signal-none-symbolic",
     "network-wireless-disconnected-symbolic",
+    // Wired: connected, connecting, cable in but idle, unplugged.
+    "network-wired-activated-symbolic",
+    "network-wired-symbolic",
+    "network-wired-disconnected-symbolic",
+    "network-wired-unavailable-symbolic",
     // Bluetooth. `network-bluetooth-symbolic` (on, nothing connected)
     // was missing from this list while the daemon emitted it, so the
     // one Bluetooth state people see most was never checked here.

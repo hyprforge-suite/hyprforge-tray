@@ -90,12 +90,9 @@ impl TrayItem {
         match self.id.as_str() {
             "hyprforge-network" => Some("network"),
             "hyprforge-bluetooth" => Some("bluetooth"),
-            // Night light lives on the Desktop screen's "Night light" tab
-            // today; there is no `--screen` argument for a specific tab,
-            // so this opens the screen and leaves picking the tab to
-            // whoever clicked. It names the *tab*, not just the screen,
-            // so a click lands on the page carrying its own setting
-            // rather than on whichever tab the Desktop screen opens with.
+            // Night light has a Settings page of its own. It used to be a
+            // tab of the Desktop screen, and naming the screen rather than
+            // the tab once landed a click on Wallpaper instead.
             "hyprforge-night-light" => Some("night-light"),
             // Keep awake has its own Power screen now (see
             // `hyprforge-trayd`'s module doc) — this used to point at
@@ -147,10 +144,10 @@ mod tests {
 
     /// Each icon opens the page its own setting is on.
     ///
-    /// Night light names a *tab* of the Desktop screen rather than a
-    /// screen of its own — naming the screen instead once landed it on
-    /// Wallpaper. Keep awake names the Power screen it now lives on,
-    /// having moved off that same Desktop screen's `Idle` tab.
+    /// Night light names its own page — when it was a tab of the Desktop
+    /// screen, naming the screen instead once landed it on Wallpaper.
+    /// Keep awake names the Power screen it now lives on, having moved
+    /// off that same Desktop screen's `Idle` tab.
     #[test]
     fn every_icon_opens_the_page_its_own_setting_is_on() {
         let item = |id: &str| TrayItem {

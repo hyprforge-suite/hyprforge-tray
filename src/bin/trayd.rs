@@ -38,9 +38,9 @@
 //! `--screen bluetooth` open those screens directly; `--screen power`
 //! opens the Power screen — for the power icon, and for keep-awake,
 //! which lives there now too (it moved off the
-//! Desktop screen's `Idle` tab); `--screen night-light` deep-links to the
-//! `NightLight` tab of the Desktop screen (`hyprforge-settings`'s
-//! `screen_from_cli`) — which is also what `TrayItem::activate_screen`
+//! Desktop screen's `Idle` tab); `--screen night-light` opens Settings'
+//! Night light page (`hyprforge-settings`'s `screen_from_cli`) — which is
+//! also what `TrayItem::activate_screen`
 //! already sends a left click on either icon to. Neither destination
 //! existed when this daemon's keep-awake and night-light icons were
 //! first added; both do now, so a settings row that used to have nowhere

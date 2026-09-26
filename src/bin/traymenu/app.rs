@@ -4,7 +4,7 @@
 //! one `impl PopupApp` rather than three smaller traits.
 
 use hyprforge_look::Theme;
-use hyprforge_popup::{Dismissal, Keysym, PopupApp};
+use hyprforge_popup::{Dismissal, Keysym, Modifiers, PopupApp};
 use hyprforge_tray::menu::MenuItem;
 use iced_runtime::core::{Element, Length, Padding};
 use iced_widget::{column, container};
@@ -115,7 +115,7 @@ impl PopupApp for TrayMenuApp {
         // Nothing to scroll — see `layout.rs`'s own module doc.
     }
 
-    fn key(&mut self, keysym: Keysym, _utf8: Option<String>) -> Option<Self::Outcome> {
+    fn key(&mut self, keysym: Keysym, _utf8: Option<String>, _modifiers: Modifiers) -> Option<Self::Outcome> {
         match keysym {
             Keysym::Escape => Some(MenuOutcome::Cancelled),
             Keysym::Return | Keysym::KP_Enter => {
@@ -200,16 +200,16 @@ mod tests {
     fn escape_cancels_regardless_of_hover_state() {
         let layout = MenuLayout::for_font_size(15.0);
         let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
-        assert_eq!(app.key(Keysym::Escape, None), Some(MenuOutcome::Cancelled));
+        assert_eq!(app.key(Keysym::Escape, None, Modifiers::default()), Some(MenuOutcome::Cancelled));
     }
 
     #[test]
     fn down_then_enter_chooses_the_first_clickable_row_skipping_the_separator() {
         let layout = MenuLayout::for_font_size(15.0);
         let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
-        assert_eq!(app.key(Keysym::Down, None), None);
+        assert_eq!(app.key(Keysym::Down, None, Modifiers::default()), None);
         assert_eq!(app.hovered, Some(0), "row 0 is the first clickable row");
-        assert_eq!(app.key(Keysym::Return, None), Some(MenuOutcome::Chosen(0)));
+        assert_eq!(app.key(Keysym::Return, None, Modifiers::default()), Some(MenuOutcome::Chosen(0)));
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         let layout = MenuLayout::for_font_size(15.0);
         let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
         app.hovered = Some(0);
-        assert_eq!(app.key(Keysym::Down, None), None);
+        assert_eq!(app.key(Keysym::Down, None, Modifiers::default()), None);
         assert_eq!(app.hovered, Some(2), "index 1 is a separator, so this must land on 2");
     }
 
@@ -225,6 +225,6 @@ mod tests {
     fn enter_with_nothing_hovered_does_nothing() {
         let layout = MenuLayout::for_font_size(15.0);
         let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
-        assert_eq!(app.key(Keysym::Return, None), None);
+        assert_eq!(app.key(Keysym::Return, None, Modifiers::default()), None);
     }
 }

@@ -102,7 +102,7 @@ hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
 # no winit window here. `iced_tiny_skia` and not `iced_wgpu` — see
 # CLAUDE.md on `web-colors`, which is why every surface in this suite is
 # drawn by the same renderer.
-iced_tiny_skia = { version = "0.14", default-features = false, features = ["wayland"] }
+iced_tiny_skia = { version = "0.14.1", default-features = false, features = ["wayland"] }
 iced_runtime = "0.14"
 iced_widget = "0.14"
 iced_renderer = { version = "0.14", default-features = false, features = ["tiny-skia"] }

@@ -1,13 +1,13 @@
 //! Where this popup's rows are, in the same logical-pixel space
 //! `view.rs` draws into — the menu's own analogue of
-//! `hyprforge-clipmenu::geometry::RowLayout`, and built for the same
+//! `hyprforge-clipmenu::geometry::Layout`, and built for the same
 //! reason: `app.rs`'s hit-test and `view.rs`'s drawing have to agree on
 //! exactly the same numbers, or a click lands on a row that is not the
 //! one drawn under the pointer. See `hyprforge-popup::popup`'s own module
 //! doc for why that is the one property every `PopupApp` in this suite
 //! is built to keep.
 //!
-//! Unlike `RowLayout`, there is no scrolling here: a tray menu is a
+//! Unlike the clipboard's `Layout`, there is no scrolling here: a tray menu is a
 //! handful of rows (`hyprforge-trayd`'s own `radio_menu` never produces
 //! more than about six), so [`MenuLayout::popup_height`] simply asks for
 //! enough room for every row, and `main.rs` sizes the popup to exactly
@@ -17,7 +17,7 @@ use hyprforge_tray::menu::{ItemKind, MenuItem};
 
 /// One row's height depends only on whether it is a separator — every
 /// other kind (standard, checkmark, disabled) draws one line of text at
-/// the same fixed height, the same reason `RowLayout` gives for a
+/// the same fixed height, the same reason the clipboard's `Layout` gives for a
 /// clipboard row: a height that depended on the label's own length would
 /// make the thing drawn and the thing hit-tested two different heights
 /// the moment a proportional font wrapped differently than expected.
@@ -44,7 +44,7 @@ impl MenuLayout {
     pub const CHECK_WIDTH: f64 = 18.0;
 
     /// Derives the layout from the theme's font size, the one variable
-    /// both this and `view.rs` already agree on — see `RowLayout::for_font_size`'s
+    /// both this and `view.rs` already agree on — see the clipboard's `Layout::for_font_size`'s
     /// own doc for why that is what keeps the two from drifting apart.
     pub fn for_font_size(font_size: f32) -> MenuLayout {
         let font_size = font_size as f64;
@@ -84,7 +84,7 @@ impl MenuLayout {
     /// (a menu reads as one continuous block, not a list of spaced
     /// cards) — plus this layout's own padding on all sides. This is
     /// exactly the popup's own height: nothing here ever scrolls, so
-    /// there is no separate "viewport" figure the way `RowLayout` needs
+    /// there is no separate "viewport" figure the way the clipboard's `Layout` needs
     /// one.
     pub fn popup_height(&self, rows: &[MenuItem]) -> f64 {
         let content: f64 = rows.iter().map(|r| self.height_of(r)).sum();
@@ -124,7 +124,7 @@ impl MenuLayout {
     /// The pixel width left over for a row's own label once the popup's
     /// outer padding, the row's own horizontal padding, and the
     /// checkmark column have taken their own space — the same reasoning
-    /// `hyprforge-clipmenu::geometry::RowLayout::preview_width` gives for
+    /// `hyprforge-clipmenu::geometry::Layout::chars_that_fit` gives for
     /// deriving a truncation width from the exact numbers the row is
     /// drawn with, rather than a flat character count that has no idea
     /// how wide this popup actually is.

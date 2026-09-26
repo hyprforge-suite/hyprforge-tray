@@ -110,7 +110,7 @@ fn row_element<'a, Message: 'a>(
     // `layout.label_width` is derived from exactly the numbers this
     // function lays the row out with (the outer padding, the row's own
     // `ROW_HPADDING`, `CHECK_WIDTH`) — the same discipline
-    // `RowLayout::preview_width` keeps in `hyprforge-clipmenu`, so the
+    // `Layout::chars_that_fit` keeps in `hyprforge-clipmenu`, so the
     // label ends before the row's own edge rather than being clipped by
     // it. `Wrapping::None` keeps this crate's own behaviour of never
     // growing a row taller for a long label; without truncation that

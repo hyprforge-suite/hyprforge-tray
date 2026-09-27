@@ -8,7 +8,7 @@ display-layout icons in whatever bar is running, and
 
 Part of [Hyprforge](https://github.com/adamrpostjr/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone. Installing this gets
-you a tray daemon and nothing else.
+you a tray daemon and the menu it draws, and nothing else.
 
 ## Why this needs no GTK or Qt
 
@@ -29,8 +29,8 @@ them in.
 
 - **The library** (`src/item.rs`, `src/menu.rs`, `src/sni.rs`,
   `src/launch.rs`, `src/prefs.rs`) — the StatusNotifierItem protocol,
-  the menu model, and launching the popup that draws it, and nothing
-  else. It knows nothing about Wi-Fi or
+  the menu model, launching the popup that draws it, and which icons
+  the user switched on in `tray.toml`, and nothing else. It knows nothing about Wi-Fi or
   Bluetooth, the same way `hyprforge-ui` knows nothing about Hyprland.
 - **`hyprforge-trayd`** (`src/bin/trayd.rs`) — the daemon that joins the
   library to `hyprforge-network`, `hyprforge-bluetooth`,
@@ -38,7 +38,7 @@ them in.
   power profile, over UPower and `power-profiles-daemon`) and
   `hyprforge-ecosystem::sunset_control` (night light, over
   `hyprctl hyprsunset`) and `hyprforge-displayd` (display layouts, over
-  its own D-Bus interface), and forwards a click to
+  its own D-Bus interface, through `hyprforge-core::displayd_proxy`), and forwards a click to
   `hyprforge-settings --screen <name>`.
 - **`hyprforge-traymenu`** (`src/bin/traymenu/`) — the popup that draws
   an item's right-click menu.
@@ -85,9 +85,12 @@ exactly this.
 cargo build --release
 ```
 
-It depends on five other Hyprforge crates — `hyprforge-paths`,
-`hyprforge-network`, `hyprforge-bluetooth`, `hyprforge-power` and
-`hyprforge-ecosystem` — taken as git dependencies on the main repository
+It depends on nine other Hyprforge crates — `hyprforge-paths`,
+`hyprforge-network`, `hyprforge-bluetooth`, `hyprforge-power`,
+`hyprforge-ecosystem` and `hyprforge-core` (its `hyprforge-displayd`
+D-Bus proxy and bounded subprocess wait) for the daemon, and `hyprforge-popup`,
+`hyprforge-appearance` and `hyprforge-look` for the menu — taken as git
+dependencies on the main repository
 rather than from crates.io, which is where they will move once they are
 published. Nothing else here is Hyprforge-specific.
 

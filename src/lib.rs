@@ -7,7 +7,8 @@
 //!
 //! The library half knows nothing about Wi-Fi or Bluetooth — it is the
 //! protocol and the item model. `src/bin/trayd.rs` is what joins it to
-//! `hyprforge-network` and `hyprforge-bluetooth`.
+//! `hyprforge-network`, `hyprforge-bluetooth`, `hyprforge-power`,
+//! hyprsunset and `hyprforge-displayd` — see its own module doc.
 //!
 //! # What this does not do any more: `com.canonical.dbusmenu`
 //!

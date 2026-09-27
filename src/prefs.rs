@@ -48,11 +48,11 @@ pub struct Prefs {
     /// switching one. Off by default like the others added after the
     /// first two.
     pub displays: bool,
-    /// Logical pixels added to a click's own Y position before the tray
-    /// menu opens there — see this module's own doc. `32` clears a
-    /// waybar-height bar (that bar defaults to about 34px tall) without
-    /// needing configuration on the common case; a taller or shorter bar
-    /// is what this field is for.
+    /// Logical pixels below the bar's own reserved area at which the tray
+    /// menu opens — see this module's own doc. (It was once added to the
+    /// click's Y instead; that made the menu's position depend on where
+    /// on the icon the click landed.) A bar that reserves less than it
+    /// visually occupies is what this field is for.
     pub menu_y_offset: i32,
     /// Whether clicking outside an open tray menu dismisses it.
     ///

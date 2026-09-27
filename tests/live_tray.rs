@@ -131,8 +131,9 @@ async fn an_update_reaches_the_host_and_an_unchanged_one_is_cheap() {
 /// test can still uniquely prove, against a real host rather than this
 /// crate's own idea of the protocol, is the property that change depends
 /// on: an item registered *with* a menu advertises exactly the same "no
-/// menu" (`/`) that one registered with none does. If that property ever
-/// regresses — the `Menu` property starts naming a real path again — a
+/// menu" that one registered with none does — no `Menu` property at all,
+/// not `/` (see the comment in the body for why those differ). If that
+/// property ever regresses — a `Menu` property appears again — a
 /// spec-compliant bar goes straight back to drawing its own menu
 /// alongside `hyprforge-traymenu`'s, which is the exact bug this whole
 /// architecture exists to avoid.

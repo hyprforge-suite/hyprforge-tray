@@ -45,7 +45,7 @@
 //! existed when this daemon's keep-awake and night-light icons were
 //! first added; both do now, so a settings row that used to have nowhere
 //! honest to send anyone finally does, and the two icons stop being the
-//! one pair of the four without a way out of their own menu.
+//! only ones without a way out of their own menu.
 
 use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBackend};
 use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};

@@ -1334,7 +1334,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Why [`Security::Enterprise`] is disabled, shortened for a menu row
+/// Why [`Security::Enterprise`](hyprforge_network::Security::Enterprise) is disabled, shortened for a menu row
 /// rather than the full sentence [`hyprforge_network::Security::unsupported_reason`]
 /// gives a whole screen to.
 const ENTERPRISE_ROW_REASON: &str = "enterprise sign-in not supported";

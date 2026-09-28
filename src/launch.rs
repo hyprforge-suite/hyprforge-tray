@@ -115,7 +115,7 @@ pub async fn show(id: &str, menu: &Menu, x: i32, y: i32, events: &UnboundedSende
 }
 
 /// [`show`], with the binary to run as a parameter — see
-/// [`TRAYMENU_BINARY`]'s own doc for why.
+/// `TRAYMENU_BINARY`'s own doc for why.
 pub async fn show_with_binary(
     binary: &str,
     id: &str,

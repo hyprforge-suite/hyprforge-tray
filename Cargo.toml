@@ -11,7 +11,7 @@ license = "MIT"
 # CLAUDE.md's rule about a comment describing behaviour that no longer
 # exists warns against — just in a manifest instead of a doc comment.
 description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
-repository = "https://github.com/adamrpostjr/hyprforge"
+repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-tray"
 readme = "README.md"
 keywords = ["hyprland", "tray", "statusnotifier", "linux"]
@@ -70,32 +70,32 @@ futures-util = "0.3"
 # touches the network; standalone, cargo fetches them from git.
 #
 # Where the preference file lives, and the atomic write that replaces it.
-hyprforge-paths = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-paths = { git = "https://github.com/hyprforge-suite/hyprforge" }
 
 # Used only by the binary. Cargo has no way to say that for a crate with
 # both, and splitting into two crates to express it would be more
 # ceremony than the fact is worth — hyprforge-displayd carries the same
 # arrangement.
-hyprforge-network = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-bluetooth = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-network = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-bluetooth = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # Keep awake (systemd-logind) and night light (hyprsunset via hyprctl) —
 # same "binary-only" arrangement as network/bluetooth above.
-hyprforge-power = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-power = { git = "https://github.com/hyprforge-suite/hyprforge" }
 # For `displayd_proxy` alone, the one definition of displayd's D-Bus
 # contract — the Settings app and displayctl speak through it, and a
 # third copy here is how the three would drift. `default-features =
 # false` because the rest of hyprforge-core is Hyprland config
 # machinery this daemon has no use for.
-hyprforge-core = { git = "https://github.com/adamrpostjr/hyprforge", default-features = false, features = ["dbus"] }
-hyprforge-ecosystem = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-core = { git = "https://github.com/hyprforge-suite/hyprforge", default-features = false, features = ["dbus"] }
+hyprforge-ecosystem = { git = "https://github.com/hyprforge-suite/hyprforge" }
 
 # Used only by the `hyprforge-traymenu` binary: the shared layer-shell
 # popup shell it is built on, and the theme it draws with. Same
 # binary-only arrangement as network/bluetooth above — Cargo has no way
 # to scope a dependency to one target of a crate that has several.
-hyprforge-popup = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-appearance = { git = "https://github.com/adamrpostjr/hyprforge" }
-hyprforge-look = { git = "https://github.com/adamrpostjr/hyprforge" }
+hyprforge-popup = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-appearance = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
 
 # The menu renders itself into the popup's raw Wayland buffer, so it
 # needs iced's pieces directly rather than the `iced` umbrella: there is
@@ -110,5 +110,5 @@ iced_renderer = { version = "0.14", default-features = false, features = ["tiny-
 [dev-dependencies]
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3"
-hyprforge-network = { git = "https://github.com/adamrpostjr/hyprforge", features = ["mock"] }
-hyprforge-bluetooth = { git = "https://github.com/adamrpostjr/hyprforge", features = ["mock"] }
+hyprforge-network = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["mock"] }
+hyprforge-bluetooth = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["mock"] }

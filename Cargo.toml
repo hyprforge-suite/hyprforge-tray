@@ -70,32 +70,32 @@ futures-util = "0.3"
 # touches the network; standalone, cargo fetches them from git.
 #
 # Where the preference file lives, and the atomic write that replaces it.
-hyprforge-paths = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-paths = "0.1"
 
 # Used only by the binary. Cargo has no way to say that for a crate with
 # both, and splitting into two crates to express it would be more
 # ceremony than the fact is worth — hyprforge-displayd carries the same
 # arrangement.
-hyprforge-network = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-bluetooth = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-network = "0.1"
+hyprforge-bluetooth = "0.1"
 # Keep awake (systemd-logind) and night light (hyprsunset via hyprctl) —
 # same "binary-only" arrangement as network/bluetooth above.
-hyprforge-power = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-power = "0.1"
 # For `displayd_proxy` alone, the one definition of displayd's D-Bus
 # contract — the Settings app and displayctl speak through it, and a
 # third copy here is how the three would drift. `default-features =
 # false` because the rest of hyprforge-core is Hyprland config
 # machinery this daemon has no use for.
-hyprforge-core = { git = "https://github.com/hyprforge-suite/hyprforge", default-features = false, features = ["dbus"] }
-hyprforge-ecosystem = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-core = { version = "0.1", default-features = false, features = ["dbus"] }
+hyprforge-ecosystem = "0.1"
 
 # Used only by the `hyprforge-traymenu` binary: the shared layer-shell
 # popup shell it is built on, and the theme it draws with. Same
 # binary-only arrangement as network/bluetooth above — Cargo has no way
 # to scope a dependency to one target of a crate that has several.
-hyprforge-popup = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-appearance = { git = "https://github.com/hyprforge-suite/hyprforge" }
-hyprforge-look = { git = "https://github.com/hyprforge-suite/hyprforge" }
+hyprforge-popup = "0.1"
+hyprforge-appearance = "0.1"
+hyprforge-look = "0.1"
 
 # The menu renders itself into the popup's raw Wayland buffer, so it
 # needs iced's pieces directly rather than the `iced` umbrella: there is
@@ -110,5 +110,5 @@ iced_renderer = { version = "0.14", default-features = false, features = ["tiny-
 [dev-dependencies]
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 tempfile = "3"
-hyprforge-network = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["mock"] }
-hyprforge-bluetooth = { git = "https://github.com/hyprforge-suite/hyprforge", features = ["mock"] }
+hyprforge-network = { version = "0.1", features = ["mock"] }
+hyprforge-bluetooth = { version = "0.1", features = ["mock"] }

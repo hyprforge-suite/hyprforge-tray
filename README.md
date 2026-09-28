@@ -89,10 +89,8 @@ It depends on nine other Hyprforge crates — `hyprforge-paths`,
 `hyprforge-network`, `hyprforge-bluetooth`, `hyprforge-power`,
 `hyprforge-ecosystem` and `hyprforge-core` (its `hyprforge-displayd`
 D-Bus proxy and bounded subprocess wait) for the daemon, and `hyprforge-popup`,
-`hyprforge-appearance` and `hyprforge-look` for the menu — taken as git
-dependencies on the main repository
-rather than from crates.io, which is where they will move once they are
-published. Nothing else here is Hyprforge-specific.
+`hyprforge-appearance` and `hyprforge-look` for the menu — published on crates.io,
+so cargo fetches them from there and never needs the main repository. Nothing else here is Hyprforge-specific.
 
 ## Running
 

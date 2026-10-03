@@ -27,8 +27,8 @@ path = "src/bin/trayd.rs"
 # The right-click menu, in this crate rather than beside it. It is a
 # separate *binary* — `sni::ItemInterface::context_menu` spawns it — and
 # a binary cannot be fetched as a dependency the way a library can, so
-# it has to be inside the one directory `git subtree split` publishes or
-# the tray's repository ships a daemon whose menu does not exist. It
+# it has to be inside this directory — the component's whole repository —
+# or the tray's repository ships a daemon whose menu does not exist. It
 # did, for a while. See repo-plan.md, "The shape a package has to have".
 [[bin]]
 name = "hyprforge-traymenu"
@@ -61,13 +61,11 @@ anyhow = "1"
 # `StreamExt::next`, for displayd's revert signals.
 futures-util = "0.3"
 
-# Named as git dependencies, not versions, because the owner has not
-# published to crates.io yet: this manifest has to work unchanged both
-# inside the Hyprforge workspace and as the root of its own standalone
-# repository once `git subtree split` pulls it out. Inside the
-# workspace, the root Cargo.toml's `[patch]` section redirects these
-# straight back to the local `crates/` directories, so nothing here
-# touches the network; standalone, cargo fetches them from git.
+# By crates.io version: this manifest has to work unchanged both inside
+# the Hyprforge workspace, where this directory is a submodule and the
+# root Cargo.toml's `[patch.crates-io]` section points these back at the
+# local `crates/` directories, and as the root of this component's own
+# repository, where cargo fetches the published crates.
 #
 # Where the preference file lives, and the atomic write that replaces it.
 hyprforge-paths = "0.1"

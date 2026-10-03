@@ -59,7 +59,7 @@ use hyprforge_network::{
 };
 use hyprforge_network::Status as NetStatus;
 use hyprforge_power::{
-    BatteryBackend, BatteryInfo, BatteryState, InhibitBackend, InhibitorInfo, LogindBackend,
+    BatteryBackend, BatteryInfo, BatteryState, DetachedBackend, InhibitBackend, InhibitorInfo,
     PowerProfile, PowerProfilesBackend, PowerProfilesDaemonBackend, UPowerBackend, WhatSet,
 };
 use hyprforge_tray::menu::{radio_menu, Menu, MenuItem};
@@ -140,6 +140,13 @@ const PREFS_WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Keep awake's holder: this binary run only to hold the inhibit — see
+    // `keep_awake_backend`. Before anything else, and before registering
+    // a single tray icon.
+    if std::env::args().nth(1).as_deref() == Some(hyprforge_power::keep_awake::HOLDER_ARG) {
+        hyprforge_power::keep_awake::hold().await?;
+        return Ok(());
+    }
     // Default to `info` rather than whatever `from_default_env` alone
     // gives with RUST_LOG unset, which is nothing — a daemon with no GUI
     // that prints nothing on start is indistinguishable from a hung one.
@@ -388,11 +395,17 @@ async fn bluetooth_backend(state: &mut Reconnecting<BlueZBackend>) -> Option<Arc
     }
 }
 
-async fn keep_awake_backend(state: &mut Reconnecting<LogindBackend>) -> Option<Arc<LogindBackend>> {
-    match state.get_or_connect(LogindBackend::connect).await {
+/// Keep awake through a holder process of its own — see
+/// `hyprforge_power::keep_awake` — so it outlives this daemon restarting,
+/// and so the icon, this daemon's menu and the Settings app all read the
+/// same answer from logind rather than each from a descriptor of its own.
+/// (They used to disagree: the menu took the lock through one backend and
+/// the icon asked another, which had never taken anything.)
+async fn keep_awake_backend(state: &mut Reconnecting<DetachedBackend>) -> Option<Arc<DetachedBackend>> {
+    match state.get_or_connect(|| async { DetachedBackend::this_binary() }).await {
         Ok(backend) => Some(backend),
         Err(e) => {
-            tracing::warn!(error = %e, "could not connect to systemd-logind; will retry");
+            tracing::warn!(error = %e, "could not find this program to run keep awake's holder; will retry");
             None
         }
     }
@@ -522,7 +535,7 @@ async fn sample_bluetooth(state: &mut Reconnecting<BlueZBackend>) -> (TrayItem, 
 /// `keep_awake_menu`) is answering "why won't this machine sleep"
 /// independent of whether this daemon is the reason, so it would be
 /// wrong to skip that call just because our own inhibit is off.
-async fn sample_keep_awake(state: &mut Reconnecting<LogindBackend>) -> (TrayItem, Menu) {
+async fn sample_keep_awake(state: &mut Reconnecting<DetachedBackend>) -> (TrayItem, Menu) {
     let Some(backend) = keep_awake_backend(state).await else {
         return (keep_awake_item(None, &[], true), keep_awake_menu(None, &[], true));
     };
@@ -1621,10 +1634,11 @@ fn bluetooth_menu(status: Option<&BtStatus>, unavailable: bool, devices: &[Devic
     radio_menu(top, content, settings_row)
 }
 
-/// The id `hyprctl`/logind knows this daemon's own inhibit by. Used both
-/// when taking one ([`perform_menu_action`]) and to recognise — and
-/// exclude — it in [`other_inhibitors`], so our own toggle never shows up
-/// a second time, disabled, in its own menu.
+/// The name this daemon's inhibit went by before keep awake moved into a
+/// holder process (`hyprforge_power::keep_awake`). Nothing takes one
+/// under it now; it is still recognised in [`other_inhibitors`] so the
+/// lock a not-yet-restarted older daemon holds is not listed as somebody
+/// else's.
 const KEEP_AWAKE_WHO: &str = "hyprforge-trayd";
 const KEEP_AWAKE_WHY: &str = "user requested via the tray";
 const KEEP_AWAKE_ITEM_ID: &str = "hyprforge-keep-awake";
@@ -1641,20 +1655,19 @@ const MAX_OTHER_INHIBITORS_SHOWN: usize = 5;
 /// our own toggle from appearing a second time in the list of *other*
 /// holders right next to the checkmark that already represents it.
 fn other_inhibitors(all: Vec<InhibitorInfo>) -> Vec<InhibitorInfo> {
-    all.into_iter().filter(|i| i.who != KEEP_AWAKE_WHO).collect()
+    all.into_iter()
+        .filter(|i| i.who != KEEP_AWAKE_WHO && i.who != hyprforge_power::keep_awake::HOLDER_WHO)
+        .collect()
 }
 
 /// What the keep-awake icon should say, from plain data — no D-Bus, no
 /// I/O. `others` is expected already filtered by [`other_inhibitors`].
 ///
-/// `Status::Active` only while this daemon is actually holding the
-/// inhibit, `Status::Passive` otherwise. This is *not* the network/
-/// Bluetooth split (radio off is passive, radio on-but-idle is still
-/// active because someone might come looking for it) — keep awake has no
-/// state of its own to monitor when it is off. "Not currently keeping
-/// this machine awake" is the ordinary condition for nearly every minute
-/// of a session, and showing it permanently would be exactly the noise a
-/// radio icon that never hides would be.
+/// `held` is whether keep awake is on — its holder is listed by logind,
+/// wherever it was turned on from. The item is `Status::Active` either
+/// way: a host hides a Passive icon, and an icon the host hides is a
+/// toggle nobody can reach (CLAUDE.md, "An icon that asks a host to hide
+/// it"); the icon *name* is what says on or off.
 fn keep_awake_item(held: Option<bool>, others: &[InhibitorInfo], unavailable: bool) -> TrayItem {
     let id = KEEP_AWAKE_ITEM_ID.to_string();
     let title = "Keep awake".to_string();
@@ -2379,7 +2392,7 @@ const SCAN_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 struct MenuClickState {
     net: Reconnecting<NetworkManagerBackend>,
     bt: Reconnecting<BlueZBackend>,
-    logind: Reconnecting<LogindBackend>,
+    logind: Reconnecting<DetachedBackend>,
     profiles: Reconnecting<PowerProfilesDaemonBackend>,
     bus: Reconnecting<zbus::Connection>,
 }
@@ -3523,6 +3536,20 @@ mod tests {
     #[test]
     fn our_own_inhibitor_is_excluded_from_the_list_of_other_holders() {
         let all = vec![inhibitor(KEEP_AWAKE_WHO, KEEP_AWAKE_WHY), inhibitor("mpv", "playing a video")];
+        let others = other_inhibitors(all);
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0].who, "mpv");
+    }
+
+    /// Keep awake's holder — started from here or from Settings — is
+    /// keep awake itself, never one of the "other" holders listed under
+    /// it.
+    #[test]
+    fn the_keep_awake_holder_is_not_listed_as_another_holder() {
+        let all = vec![
+            inhibitor(hyprforge_power::keep_awake::HOLDER_WHO, "Keep awake is on"),
+            inhibitor("mpv", "playing a video"),
+        ];
         let others = other_inhibitors(all);
         assert_eq!(others.len(), 1);
         assert_eq!(others[0].who, "mpv");

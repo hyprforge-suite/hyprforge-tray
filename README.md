@@ -100,6 +100,11 @@ so cargo fetches them from there and never needs the main repository. Nothing el
 systemctl --user enable --now hyprforge-trayd
 ```
 
+That is the manual route. The Arch package enables it for every user
+when it is installed, through a systemd preset. With Hyprforge Settings
+installed, its **Set up** page (or `hyprforge-settings --setup`) enables
+it and can undo that.
+
 `Restart=always` rather than `on-failure`: the daemon waits for a
 `StatusNotifierWatcher` rather than exiting when there isn't one yet, so
 starting before the bar is not a race it can lose, and a clean exit that

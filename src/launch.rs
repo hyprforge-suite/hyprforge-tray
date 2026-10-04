@@ -261,6 +261,9 @@ mod tests {
     /// crash and never silence.
     #[tokio::test]
     async fn a_missing_binary_is_reported_as_not_installed_rather_than_panicking() {
+        // See `SPAWNING`: a spawn that finds nothing still forks first,
+        // and that fork is the one the other tests' scripts race.
+        let _spawning = SPAWNING.lock().await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome =
             show_with_binary("hyprforge-traymenu-does-not-exist-xyz", "hyprforge-network", &menu(), 10, 20, &tx, &OpenMenu::default())
@@ -329,6 +332,17 @@ mod tests {
     /// script and immediately runs it, and `show_with_binary` forks — so
     /// with more than one running at once, one test's fork can poison
     /// another test's exec.
+    ///
+    /// *Every* test that spawns takes it, including the one whose binary
+    /// does not exist. A spawn that ends in "not found" still forks
+    /// first, and its child holds a copy of the descriptor table while it
+    /// tries each `$PATH` entry in turn — long enough to be the fork this
+    /// lock is about. That test once went without the lock, because it
+    /// writes no script, and a CI runner caught
+    /// `whatever_the_child_prints_on_stdout_reaches_the_events_channel`
+    /// in that window. Measured in a standalone program: a thread spawning
+    /// a missing binary in a loop made 240 of 2000 write-then-exec runs
+    /// fail with `ETXTBSY`.
     ///
     /// A `tokio::sync::Mutex` rather than a `std` one because it is held
     /// across the `.await` on the child.

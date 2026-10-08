@@ -30,6 +30,11 @@
 //! position depend on where on the icon the click landed. Anchoring to
 //! the bar instead of the pointer meant moving the read to whichever
 //! process actually places the popup.
+//!
+//! `menu` is which of two ways a right click is served — see
+//! [`MenuMode`]. The answer depends on the machine as well as the file,
+//! so the file holds the user's *choice* and [`MenuMode::serving_here`]
+//! turns it into what actually happens.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -66,6 +71,92 @@ pub struct Prefs {
     /// which is what somebody driving it entirely from the keyboard
     /// would want, at the cost of a stray click doing nothing.
     pub menu_closes_on_click_outside: bool,
+    /// How a right click is served: Hyprforge's own popup, or a
+    /// `com.canonical.dbusmenu` menu the bar draws itself. See
+    /// [`MenuMode`].
+    pub menu: MenuMode,
+}
+
+/// Which way the right-click menus are served — the user's choice, as
+/// `tray.toml` holds it.
+///
+/// The popup (`hyprforge-traymenu`) is the suite's own menu: themed like
+/// the clipboard and emoji popups, anchored below the bar at the icon
+/// that was clicked. It needs two things this daemon cannot assume. It
+/// reads the monitors through `hyprctl`, so it only works on Hyprland.
+/// And the bar has to call `ContextMenu` on an item that declares no
+/// `Menu` property, which a bar that only draws dbusmenu never does —
+/// on such a bar the popup is never even asked for.
+///
+/// `com.canonical.dbusmenu` is the fallback that works on any
+/// spec-compliant bar and any compositor, drawn and placed however that
+/// bar's tray module chooses. It is the menu this crate served before the
+/// popup existed, and it comes back as a choice rather than the default
+/// because the popup is the better menu wherever it can run.
+///
+/// `Auto`, the default, picks the popup where it can run and dbusmenu
+/// everywhere else, so installing the tray on sway gives right-click
+/// menus with nothing configured. `Popup` and `Dbusmenu` force one —
+/// `Dbusmenu` is for a bar on Hyprland that never calls `ContextMenu`,
+/// which nothing here can detect from the outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MenuMode {
+    #[default]
+    Auto,
+    Popup,
+    Dbusmenu,
+}
+
+/// What a right click is actually served by, once [`MenuMode::Auto`] has
+/// been decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuServing {
+    /// No `Menu` property; `ContextMenu` spawns `hyprforge-traymenu`.
+    Popup,
+    /// A `Menu` property naming a `com.canonical.dbusmenu` object.
+    Dbusmenu,
+}
+
+impl MenuMode {
+    /// The decision, as a pure function of what the machine offers.
+    ///
+    /// `on_hyprland` and `traymenu_installed` are passed in rather than
+    /// looked up so every combination is testable without a compositor
+    /// or a `$PATH` — [`Self::serving_here`] is the one place that asks.
+    pub fn serving(self, on_hyprland: bool, traymenu_installed: bool) -> MenuServing {
+        match self {
+            MenuMode::Popup => MenuServing::Popup,
+            MenuMode::Dbusmenu => MenuServing::Dbusmenu,
+            MenuMode::Auto if on_hyprland && traymenu_installed => MenuServing::Popup,
+            MenuMode::Auto => MenuServing::Dbusmenu,
+        }
+    }
+
+    /// [`Self::serving`], asked of this machine.
+    ///
+    /// Hyprland sets `HYPRLAND_INSTANCE_SIGNATURE` for everything it
+    /// starts, and `hyprctl` — which the popup needs — reads the same
+    /// variable to find its socket, so its absence is exactly "the popup
+    /// cannot place itself". Cheap enough for every poll tick: one
+    /// environment read and a `stat` per `$PATH` entry.
+    pub fn serving_here(self) -> MenuServing {
+        let on_hyprland = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|v| !v.is_empty());
+        self.serving(on_hyprland, on_path(crate::launch::TRAYMENU_BINARY))
+    }
+}
+
+/// Whether `name` is an executable file in some `$PATH` directory — the
+/// lookup `Command::new` will do when it is spawned.
+fn on_path(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        std::fs::metadata(dir.join(name))
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
 }
 
 impl Default for Prefs {
@@ -79,6 +170,7 @@ impl Default for Prefs {
             displays: false,
             menu_y_offset: 32,
             menu_closes_on_click_outside: true,
+            menu: MenuMode::Auto,
         }
     }
 }
@@ -148,7 +240,7 @@ pub fn save(prefs: &Prefs) -> Result<(), PrefsError> {
 }
 
 pub fn save_to(path: &Path, prefs: &Prefs) -> Result<(), PrefsError> {
-    let text = toml::to_string_pretty(prefs).expect("Prefs is two bools and always serialises");
+    let text = toml::to_string_pretty(prefs).expect("Prefs is plain fields and always serialises");
     hyprforge_paths::write_atomic(path, &text).map_err(|source| PrefsError::Write {
         path: path.to_path_buf(),
         source,
@@ -252,6 +344,7 @@ mod tests {
             displays: true,
             menu_y_offset: 50,
             menu_closes_on_click_outside: false,
+            menu: MenuMode::Dbusmenu,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path).unwrap(), prefs);
@@ -375,6 +468,70 @@ mod tests {
         assert!(matches!(err, PrefsError::Unreadable { .. }));
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(before, after, "the mutation must never have been applied or saved");
+    }
+
+    // --- `menu`: which way a right click is served ----------------------
+
+    /// A `tray.toml` written before this field existed must keep the menu
+    /// people already had where it can still run — `auto`, never a forced
+    /// mode they did not choose.
+    #[test]
+    fn a_tray_toml_written_before_the_menu_mode_existed_reads_as_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "network = true\nmenu_y_offset = 40\n").unwrap();
+        assert_eq!(load_from(&path).unwrap().menu, MenuMode::Auto);
+    }
+
+    /// The spelling a person writes by hand, and the spelling this file
+    /// writes, are the same lowercase words.
+    #[test]
+    fn the_menu_mode_is_written_and_read_as_a_lowercase_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "menu = \"dbusmenu\"\n").unwrap();
+        assert_eq!(load_from(&path).unwrap().menu, MenuMode::Dbusmenu);
+
+        save_to(&path, &Prefs { menu: MenuMode::Popup, ..Prefs::default() }).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("menu = \"popup\""));
+    }
+
+    /// A misspelt mode is a file that will not parse, reported like any
+    /// other — not quietly read as `auto`.
+    #[test]
+    fn an_unknown_menu_mode_is_reported_rather_than_defaulted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.toml");
+        std::fs::write(&path, "menu = \"gtk\"\n").unwrap();
+        assert!(matches!(load_from(&path), Err(PrefsError::Unreadable { .. })));
+    }
+
+    /// `auto` picks the popup only where it can run: on Hyprland, with
+    /// the binary installed. Anywhere else it is dbusmenu, so a tray on
+    /// another compositor has right-click menus with nothing configured.
+    #[test]
+    fn auto_serves_the_popup_only_on_hyprland_with_traymenu_installed() {
+        assert_eq!(MenuMode::Auto.serving(true, true), MenuServing::Popup);
+        assert_eq!(MenuMode::Auto.serving(true, false), MenuServing::Dbusmenu);
+        assert_eq!(MenuMode::Auto.serving(false, true), MenuServing::Dbusmenu);
+        assert_eq!(MenuMode::Auto.serving(false, false), MenuServing::Dbusmenu);
+    }
+
+    /// A forced mode is what the user asked for, whatever the machine
+    /// offers — `dbusmenu` exists for a bar on Hyprland that never calls
+    /// `ContextMenu`, which looks identical from here to one that does.
+    #[test]
+    fn a_forced_mode_wins_over_what_the_machine_offers() {
+        for (hyprland, installed) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(MenuMode::Popup.serving(hyprland, installed), MenuServing::Popup);
+            assert_eq!(MenuMode::Dbusmenu.serving(hyprland, installed), MenuServing::Dbusmenu);
+        }
+    }
+
+    #[test]
+    fn a_binary_counts_as_installed_only_when_it_is_an_executable_file_on_path() {
+        assert!(on_path("sh"), "every machine this runs on has a shell on $PATH");
+        assert!(!on_path("hyprforge-no-such-binary-anywhere"));
     }
 
     /// `update` on a first run (no file yet) still works, starting from

@@ -1,8 +1,8 @@
 //! Handing a right-click's menu to `hyprforge-traymenu` and reading back
 //! what was chosen.
 //!
-//! This is the whole reason `hyprforge-tray` no longer serves
-//! `com.canonical.dbusmenu` — see this crate's own module doc. The menu
+//! The popup path — see this crate's own module doc for when it is used
+//! and when `com.canonical.dbusmenu` is served instead. The menu
 //! this daemon already builds every poll tick is drawn by a *sibling
 //! process* instead of by whatever bar is running, over the shortest-lived
 //! IPC there is: a pipe to a child this process just spawned. The menu
@@ -31,9 +31,9 @@ use tokio::sync::Mutex;
 /// `hyprforge-traymenu`; the item's own id follows, as
 /// `menu:opened:hyprforge-network`.
 ///
-/// The direct descendant of the old `com.canonical.dbusmenu` protocol's
-/// `AboutToShow` — same purpose, same string, moved here because there is
-/// no dbusmenu object left to carry it. `hyprforge-trayd`'s
+/// The popup path's form of `com.canonical.dbusmenu`'s `AboutToShow` —
+/// same purpose, same string, sent by `crate::dbusmenu` on that path, so
+/// the daemon reads one event whichever way a menu was served. `hyprforge-trayd`'s
 /// `handle_menu_clicks` is what actually reads this prefix; see its own
 /// doc for why the Wi-Fi item is the only one anything happens for.
 pub const OPENED_PREFIX: &str = "menu:opened:";
@@ -42,7 +42,7 @@ pub const OPENED_PREFIX: &str = "menu:opened:";
 /// [`show_with_binary`] rather than a literal there, so a test can point
 /// this whole sequence at something other than the real popup — see this
 /// module's own tests.
-const TRAYMENU_BINARY: &str = "hyprforge-traymenu";
+pub(crate) const TRAYMENU_BINARY: &str = "hyprforge-traymenu";
 
 /// The one tray menu that may be open at a time, and the handle that
 /// closes it.
@@ -137,7 +137,7 @@ pub async fn show_with_binary(
         Err(e) => {
             // Never a menu label in this line — a serialisation failure
             // is a shape problem (a signature drift like the one
-            // `dbusmenu.rs` used to warn about), not something with
+            // `dbusmenu.rs` warns about), not something with
             // content worth naming.
             tracing::warn!(error = %e, "couldn't serialise the tray menu; not showing it");
             return LaunchOutcome::Failed;

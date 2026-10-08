@@ -118,25 +118,14 @@ async fn an_update_reaches_the_host_and_an_unchanged_one_is_cheap() {
     icon.update(changed).await.expect("a changed update emits and succeeds");
 }
 
-/// The menu, over the wire — or rather, the deliberate absence of one.
+/// The popup path, over the wire — the deliberate absence of a menu.
 ///
-/// `hyprforge-tray` used to serve `com.canonical.dbusmenu` at
-/// `/StatusNotifierItem/Menu` for any item registered with a menu, and a
-/// wrong `GetLayout` signature there was invisible: the host would read a
-/// menu with no rows and show an empty popup, with nothing logged at
-/// either end — which is why this test used to put one on a real bus and
-/// read it back. It no longer does either of those things: this crate
-/// stopped serving that protocol so that only `hyprforge-traymenu` draws
-/// the menu (see `src/lib.rs`'s own module doc for the cost). What this
-/// test can still uniquely prove, against a real host rather than this
-/// crate's own idea of the protocol, is the property that change depends
-/// on: an item registered *with* a menu advertises exactly the same "no
-/// menu" that one registered with none does — no `Menu` property at all,
-/// not `/` (see the comment in the body for why those differ). If that
-/// property ever regresses — a `Menu` property appears again — a
-/// spec-compliant bar goes straight back to drawing its own menu
-/// alongside `hyprforge-traymenu`'s, which is the exact bug this whole
-/// architecture exists to avoid.
+/// An item served for `hyprforge-traymenu` must advertise exactly the
+/// same "no menu" that one registered with none does — no `Menu`
+/// property at all, not `/` (see the comment in the body for why those
+/// differ). If a `Menu` property ever appears on this path, a
+/// spec-compliant bar draws its own menu instead of calling
+/// `ContextMenu`, and the popup never opens.
 #[tokio::test]
 #[ignore]
 async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
@@ -196,10 +185,10 @@ async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
          hyprforge-traymenu is launched"
     );
 
-    // And nothing answers `com.canonical.dbusmenu` at the old path either
-    // — a host that ignored `Menu` and asked anyway (unlikely, but the
-    // whole point of a live test is not assuming) must find nothing
-    // there, not a stale object this crate forgot to stop serving.
+    // And nothing answers `com.canonical.dbusmenu` at the menu path
+    // either — a host that ignored `Menu` and asked anyway (unlikely, but
+    // the whole point of a live test is not assuming) must find nothing
+    // there on the popup path.
     let reply = connection
         .call_method(
             Some(icon.bus_name()),
@@ -211,6 +200,90 @@ async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
         .await;
     assert!(
         reply.is_err(),
-        "com.canonical.dbusmenu must not be served at all any more; got {reply:?}"
+        "com.canonical.dbusmenu must not be served on the popup path; got {reply:?}"
     );
+}
+
+/// The dbusmenu path, over the wire: `Menu` names the object, and the
+/// object a real bus answers for has rows in it.
+///
+/// A wrong `GetLayout` signature is invisible everywhere else — the bar
+/// reads a menu with no rows and draws an empty popup, with nothing
+/// logged at either end — so this puts one on a real bus and reads it
+/// back the way a bar would: the property first, then the layout at the
+/// path the property names.
+#[tokio::test]
+#[ignore]
+async fn an_item_served_as_dbusmenu_names_a_menu_with_rows_in_it() {
+    use hyprforge_tray::menu::{Menu, MenuItem};
+    use hyprforge_tray::MenuServing;
+
+    let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (menu_clicks, _mrx) = tokio::sync::mpsc::unbounded_channel();
+    let menu = Menu::new(vec![
+        MenuItem::checkmark("Wi-Fi", true, "radio:toggle"),
+        MenuItem::separator(),
+        MenuItem::standard("Network settings…", "settings"),
+    ]);
+
+    let icon = match TrayIcon::register_serving(
+        item("hyprforge-network"),
+        menu,
+        MenuServing::Dbusmenu,
+        94,
+        clicks,
+        menu_clicks,
+    )
+    .await
+    {
+        Ok(icon) => icon,
+        Err(TrayError::NoWatcher) => {
+            eprintln!("{SKIP_MARKER} no StatusNotifierWatcher is running (no bar with a tray)");
+            return;
+        }
+        Err(e) => panic!("registration failed: {e}"),
+    };
+    assert!(icon.menu_declared(), "a menu with rows is declared on the dbusmenu path");
+
+    let connection = zbus::Connection::session().await.expect("a session bus");
+
+    let path: zbus::zvariant::OwnedObjectPath = connection
+        .call_method(
+            Some(icon.bus_name()),
+            "/StatusNotifierItem",
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.kde.StatusNotifierItem", "Menu"),
+        )
+        .await
+        .expect("the dbusmenu path declares a Menu property")
+        .body()
+        .deserialize::<zbus::zvariant::OwnedValue>()
+        .expect("a property is a variant")
+        .try_into()
+        .expect("Menu is an object path");
+    assert_eq!(path.as_str(), hyprforge_tray::sni::MENU_PATH);
+
+    // `(u(ia{sv}av))` — the revision, then the root node. Read back
+    // generically, the way a bar sees it, rather than through this
+    // crate's own type.
+    let reply = connection
+        .call_method(
+            Some(icon.bus_name()),
+            path.as_str(),
+            Some("com.canonical.dbusmenu"),
+            "GetLayout",
+            &(0i32, -1i32, Vec::<String>::new()),
+        )
+        .await
+        .expect("the object the Menu property names answers GetLayout");
+    // zbus prints a body's arguments wrapped as one structure, so the
+    // wire's `u(ia{sv}av)` — a revision, then a node — reads with an
+    // outer pair of parentheses here.
+    assert_eq!(reply.body().signature().to_string(), "(u(ia{sv}av))", "the signature a bar parses against");
+    type Node = (i32, std::collections::HashMap<String, zbus::zvariant::OwnedValue>, Vec<zbus::zvariant::OwnedValue>);
+    let (_revision, (root_id, _props, children)): (u32, Node) =
+        reply.body().deserialize().expect("a revision and a root node");
+    assert_eq!(root_id, 0, "the root is id 0");
+    assert_eq!(children.len(), 3, "every row reaches the bar — an empty layout is an empty menu");
 }

@@ -5,14 +5,13 @@
 //! plain data.
 //!
 //! Every type here derives `Serialize`/`Deserialize` for one reason: this
-//! is now the wire format `hyprforge-trayd` hands `hyprforge-traymenu` on
-//! its stdin, as JSON — see `crate::launch`. That is a private pipe
-//! between a daemon and the one popup it just spawned, never a
-//! `com.canonical.dbusmenu` object exposed to an arbitrary host, which is
-//! what makes it safe to serialise [`MenuItem::action`] directly instead
-//! of the id-indirection a real dbusmenu host would need (`hyprforge-tray`
-//! no longer implements that protocol at all — see this crate's own
-//! module doc).
+//! is the wire format `hyprforge-trayd` hands `hyprforge-traymenu` on its
+//! stdin, as JSON — see `crate::launch`. That is a private pipe between a
+//! daemon and the one popup it just spawned, which is what makes it safe
+//! to serialise [`MenuItem::action`] directly. The other path,
+//! `crate::dbusmenu`, exposes the same menu to an arbitrary host and keeps
+//! the id-indirection that protocol needs: a host sees ids and labels,
+//! never an action string.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,12 +42,11 @@ pub struct MenuItem {
     pub kind: ItemKind,
     /// `Some` only for [`ItemKind::Checkmark`].
     pub toggle: Option<bool>,
-    /// What clicking this row should do. Serialised now, unlike before
-    /// `hyprforge-traymenu` existed: this crate's own popup is the only
-    /// thing that ever reads it (see `crate::launch`), and it hands the
-    /// string straight back on its own stdout rather than an id needing a
-    /// second lookup — there is no host here to keep it from, the way a
-    /// real dbusmenu client is kept from it.
+    /// What clicking this row should do. Serialised for this crate's own
+    /// popup, the only thing that ever reads it (see `crate::launch`): it
+    /// hands the string straight back on its own stdout rather than an id
+    /// needing a second lookup. A dbusmenu host never sees it — it sends
+    /// back an id, which [`Menu::action_for`] resolves.
     pub action: Option<String>,
     pub children: Vec<MenuItem>,
 }
@@ -376,10 +374,23 @@ mod tests {
         assert_eq!(short.items[0].id, long.items[0].id, "the toggle is row 1 in both");
     }
 
+    /// Every menu `hyprforge-trayd` builds goes through `radio_menu`, and
+    /// the settings row it always ends with is what lets the dbusmenu
+    /// path declare a `Menu` for every icon: a menu with no rows is never
+    /// declared (`sni::declares_menu`), so an empty one here would quietly
+    /// put that icon back on the popup path, on a machine that cannot run
+    /// the popup.
+    #[test]
+    fn a_menu_built_for_an_icon_is_never_empty_even_with_nothing_to_toggle() {
+        let menu = radio_menu(vec![MenuItem::disabled("Unavailable")], Vec::new(), MenuItem::standard("Settings…", "settings"));
+        assert!(!menu.items.is_empty());
+        assert_eq!(menu.items.last().map(|i| i.label.as_str()), Some("Settings…"));
+    }
+
     // --- JSON round trip: the wire format `hyprforge-trayd` hands
     // `hyprforge-traymenu` on stdin. Getting this wrong is silent in
-    // exactly the way `dbusmenu.rs`'s own module doc warned about for the
-    // old protocol — a menu that deserialises with the wrong shape opens
+    // exactly the way `dbusmenu.rs`'s own module doc warns about for
+    // that protocol — a menu that deserialises with the wrong shape opens
     // an empty or broken popup, with nothing logged at either end.
 
     #[test]

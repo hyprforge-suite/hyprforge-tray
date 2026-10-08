@@ -16,11 +16,13 @@ A tray icon is a D-Bus object, not a widget drawn by a toolkit. This
 crate registers an `org.kde.StatusNotifierItem` with whichever
 `StatusNotifierWatcher` a bar runs — the icon a user sees is the bar's
 own rendering of a name and a handful of properties read off the bus.
-The right-click menu is not left to the bar: `hyprforge-traymenu` draws
-it, themed like the rest of the suite and anchored below the bar. The
-cost is that a bar with no Hyprforge installed shows the icon and no
-menu, where a `com.canonical.dbusmenu` menu would have drawn anywhere;
-`src/lib.rs` has the reasoning. That
+On Hyprland the right-click menu is not left to the bar:
+`hyprforge-traymenu` draws it, themed like the rest of the suite and
+anchored below the bar. Where the popup cannot run — another
+compositor, or a bar that never asks for it — the daemon serves the
+same menu as `com.canonical.dbusmenu` and the bar draws it instead.
+`tray.toml`'s `menu = "auto" | "popup" | "dbusmenu"` picks; `auto`, the
+default, does the above, and `src/lib.rs` has the reasoning. That
 is what makes it possible inside a suite that forbids GTK and Qt
 everywhere else: every other way to put an icon in a tray drags one of
 them in.
@@ -28,8 +30,9 @@ them in.
 ## What is in here
 
 - **The library** (`src/item.rs`, `src/menu.rs`, `src/sni.rs`,
-  `src/launch.rs`, `src/prefs.rs`) — the StatusNotifierItem protocol,
-  the menu model, launching the popup that draws it, and which icons
+  `src/dbusmenu.rs`, `src/launch.rs`, `src/prefs.rs`) — the
+  StatusNotifierItem protocol, the menu model, launching the popup that
+  draws it or serving it over `com.canonical.dbusmenu`, and which icons
   the user switched on in `tray.toml`, and nothing else. It knows nothing about Wi-Fi or
   Bluetooth, the same way `hyprforge-ui` knows nothing about Hyprland.
 - **`hyprforge-trayd`** (`src/bin/trayd.rs`) — the daemon that joins the

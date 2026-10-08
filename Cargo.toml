@@ -3,14 +3,12 @@ name = "hyprforge-tray"
 version = "0.1.8"
 edition = "2021"
 license = "MIT"
-# No longer "StatusNotifierItem/dbusmenu": this crate stopped serving
-# com.canonical.dbusmenu (see src/lib.rs's own module doc for the cost
-# that carries) in favour of `hyprforge-traymenu`, a sibling popup this
-# crate's own `sni::ItemInterface::context_menu` spawns directly. Say so
-# here too, or this description would be exactly the stale claim
-# CLAUDE.md's rule about a comment describing behaviour that no longer
-# exists warns against — just in a manifest instead of a doc comment.
-description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, drawing its own right-click menu through hyprforge-traymenu."
+# Both menu paths are named: hyprforge-traymenu where it can run, and
+# com.canonical.dbusmenu for the bar to draw everywhere else (see
+# src/lib.rs's own module doc). A description naming only one of them is
+# the stale claim CLAUDE.md's rule about docs describing behaviour that
+# no longer exists warns against, in a manifest instead of a doc comment.
+description = "A StatusNotifierItem tray library, plus the hyprforge-trayd daemon that puts network (Wi-Fi and Ethernet), Bluetooth, keep-awake, night-light, battery/power-profile and display-layout icons in whatever bar is running, drawing its right-click menus through hyprforge-traymenu on Hyprland and serving com.canonical.dbusmenu everywhere else."
 repository = "https://github.com/hyprforge-suite/hyprforge"
 documentation = "https://docs.rs/hyprforge-tray"
 readme = "README.md"

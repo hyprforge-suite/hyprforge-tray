@@ -1,6 +1,18 @@
 //! Serving `org.kde.StatusNotifierItem`, and staying registered.
+//!
+//! An item is served one of two ways, chosen when it registers (see
+//! [`crate::prefs::MenuMode`]): with **no `Menu` property at all**, so a
+//! right click reaches `ItemInterface::context_menu` and opens
+//! `hyprforge-traymenu`; or with a `Menu` property naming a
+//! `com.canonical.dbusmenu` object ([`crate::dbusmenu`]) the bar draws
+//! itself. zbus declares an interface's properties at compile time, so
+//! the two are two interface types — `ItemInterface` and
+//! `ItemWithMenuInterface` — and switching between them means
+//! registering the item again.
 
 use crate::item::TrayItem;
+use crate::menu::Menu;
+use crate::prefs::MenuServing;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -12,6 +24,34 @@ use zbus::Connection;
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const ITEM_PATH: &str = "/StatusNotifierItem";
+
+/// Where the `com.canonical.dbusmenu` object lives, for an item served
+/// that way. The same path this crate used before the popup existed, and
+/// the one most items in the wild use.
+pub const MENU_PATH: &str = "/StatusNotifierItem/Menu";
+
+/// Whether an item declares a `Menu` property at all.
+///
+/// Only when it is served as dbusmenu *and* has rows to serve. An empty
+/// layout behind a declared `Menu` is the worst answer there is: a bar
+/// builds a menu from it, draws an empty four-pixel GTK menu at the
+/// pointer, and — believing it handled the click — never calls
+/// `ContextMenu`, so not even the item's primary action runs. An item
+/// with nothing to show stays on the no-`Menu` path, where a right click
+/// at least reaches `ItemInterface::context_menu`.
+pub fn declares_menu(serving: MenuServing, menu: Option<&Menu>) -> bool {
+    serving == MenuServing::Dbusmenu && menu.is_some_and(|m| !m.items.is_empty())
+}
+
+/// Whether a menu update may replace what is served.
+///
+/// Refused only for the case [`declares_menu`] exists to rule out, met
+/// later: an item already advertising a `Menu` must never be left serving
+/// an empty layout behind it. Keeping the last real menu is stale for one
+/// poll at worst; an empty one is a menu that cannot be opened at all.
+pub fn takes_menu_update(declared: bool, next: &Menu) -> bool {
+    !(declared && next.items.is_empty())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrayError {
@@ -120,9 +160,10 @@ impl ItemInterface {
     /// item *only* supports the context menu — not the case here, since
     /// every icon has a primary action (open the Settings screen it is
     /// about) that a left click should reach directly, menu or no menu.
-    /// The menu is reserved for the secondary, right-click gesture; see
-    /// [`Self::context_menu`] for how it is shown now that this crate no
-    /// longer serves `com.canonical.dbusmenu` for a host to draw itself.
+    /// The menu is reserved for the secondary, right-click gesture: drawn
+    /// by `hyprforge-traymenu` from [`Self::context_menu`] on this
+    /// interface, or by the bar from `com.canonical.dbusmenu` on
+    /// `ItemWithMenuInterface`.
     #[zbus(property)]
     async fn item_is_menu(&self) -> bool {
         false
@@ -141,7 +182,9 @@ impl ItemInterface {
     }
 
     // There is deliberately **no `Menu` property on this interface at
-    // all**, and that is not the same as answering `/`.
+    // all**, and that is not the same as answering `/`. (An item served
+    // as dbusmenu is a different interface type, `ItemWithMenuInterface`,
+    // whose `Menu` names a real object with rows behind it.)
     //
     // `/` was the first attempt, on the reading that an object path
     // cannot be null so the root path must mean "nothing here". A bar
@@ -191,17 +234,14 @@ impl ItemInterface {
 
     /// Right-click.
     ///
-    /// [`Self::menu`] always answers `/` now, so a host never draws a
-    /// menu of its own for this call to be a fallback from — this *is*
-    /// the menu, for every host. What used to be waybar's own
-    /// `com.canonical.dbusmenu` fallback path (calling this only when the
-    /// dbusmenu it asked for came back with no layout) is now the only
-    /// path: this spawns `hyprforge-traymenu`, hands it the menu this
-    /// daemon already built, and forwards whatever it prints back to
-    /// `hyprforge-trayd`'s own action pipeline — see
-    /// `crate::launch::show`'s doc for the whole sequence, and this
-    /// crate's own module doc for why a host can no longer draw this
-    /// itself.
+    /// This interface declares no `Menu` property, so a host has nothing
+    /// to draw a menu of its own from and calls this instead — this *is*
+    /// the menu on the popup path. It spawns `hyprforge-traymenu`, hands
+    /// it the menu this daemon already built, and forwards whatever it
+    /// prints back to `hyprforge-trayd`'s own action pipeline — see
+    /// `crate::launch::show`'s doc for the whole sequence. (On
+    /// `ItemWithMenuInterface` the bar draws the menu from dbusmenu, and
+    /// reaches this only if it calls `ContextMenu` anyway.)
     ///
     /// Spawned onto its own task rather than awaited here: the host is
     /// blocked on this D-Bus method returning, and the popup can stay
@@ -258,6 +298,102 @@ impl ItemInterface {
     async fn new_title(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
+/// The same item, served with a `Menu` property — the dbusmenu path.
+///
+/// A separate type rather than a flag on `ItemInterface`, because a
+/// zbus interface declares its properties at compile time and the whole
+/// point of the popup path is that the property is not declared at all
+/// (see the comment where it would sit on `ItemInterface`). Everything
+/// else is the same item, so every member delegates to `inner`.
+///
+/// Only ever built by [`TrayIcon`] for an item [`declares_menu`] allows,
+/// so the path it names always has rows behind it.
+struct ItemWithMenuInterface {
+    inner: ItemInterface,
+}
+
+#[zbus::interface(name = "org.kde.StatusNotifierItem")]
+impl ItemWithMenuInterface {
+    #[zbus(property)]
+    async fn category(&self) -> String {
+        self.inner.category().await
+    }
+
+    #[zbus(property)]
+    async fn id(&self) -> String {
+        self.inner.id().await
+    }
+
+    #[zbus(property)]
+    async fn title(&self) -> String {
+        self.inner.title().await
+    }
+
+    #[zbus(property)]
+    async fn status(&self) -> String {
+        self.inner.status().await
+    }
+
+    #[zbus(property)]
+    async fn icon_name(&self) -> String {
+        self.inner.icon_name().await
+    }
+
+    #[zbus(property)]
+    async fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
+        self.inner.icon_pixmap().await
+    }
+
+    #[zbus(property)]
+    async fn item_is_menu(&self) -> bool {
+        self.inner.item_is_menu().await
+    }
+
+    #[zbus(property)]
+    async fn tool_tip(&self) -> (String, Vec<(i32, i32, Vec<u8>)>, String, String) {
+        self.inner.tool_tip().await
+    }
+
+    /// The `com.canonical.dbusmenu` object this item's menu is served at.
+    #[zbus(property)]
+    async fn menu(&self) -> zbus::zvariant::OwnedObjectPath {
+        zbus::zvariant::OwnedObjectPath::try_from(MENU_PATH).expect("MENU_PATH is a valid object path")
+    }
+
+    #[zbus(property)]
+    async fn window_id(&self) -> i32 {
+        self.inner.window_id().await
+    }
+
+    async fn activate(&self, x: i32, y: i32) {
+        self.inner.activate(x, y).await;
+    }
+
+    async fn secondary_activate(&self, x: i32, y: i32) {
+        self.inner.secondary_activate(x, y).await;
+    }
+
+    /// A bar that draws dbusmenu does not call this; one that calls it
+    /// anyway gets the popup path's answer — `hyprforge-traymenu` where
+    /// it is installed, the primary action where it is not.
+    async fn context_menu(&self, x: i32, y: i32) {
+        self.inner.context_menu(x, y).await;
+    }
+
+    async fn scroll(&self, delta: i32, orientation: String) {
+        self.inner.scroll(delta, orientation).await;
+    }
+
+    #[zbus(signal)]
+    async fn new_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn new_status(emitter: &SignalEmitter<'_>, status: &str) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn new_title(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+}
+
 /// A live tray icon: its own bus name, its own connection, its own
 /// registration.
 ///
@@ -269,12 +405,24 @@ pub struct TrayIcon {
     bus_name: String,
     state: Arc<Mutex<TrayItem>>,
     last: Mutex<TrayItem>,
-    /// `None` for an item registered without one. Never advertised over
-    /// D-Bus any more (see [`ItemInterface::menu`]) — this is purely this
-    /// daemon's own record of the menu's current content, for
-    /// [`ItemInterface::context_menu`] to hand to `hyprforge-traymenu`
-    /// the next time it is spawned.
+    /// `None` for an item registered without one. The menu's current
+    /// content: what `ItemInterface::context_menu` hands to
+    /// `hyprforge-traymenu` the next time it is spawned, and — for an
+    /// item served as dbusmenu — what the `com.canonical.dbusmenu` object
+    /// answers `GetLayout` from.
     menu: Option<Arc<Mutex<crate::menu::Menu>>>,
+    /// What this item was asked to be served as. Kept as asked, not as
+    /// it ended up ([`Self::menu_declared`]), so a daemon comparing it
+    /// with the mode it wants now re-registers only when the *choice*
+    /// changed — not every tick for an item that had no rows to declare.
+    serving: MenuServing,
+    /// Whether a `Menu` property and a dbusmenu object were actually
+    /// served — see [`declares_menu`].
+    menu_declared: bool,
+    /// dbusmenu's layout revision. Has to go **up** on every change: a
+    /// host that sees the same revision assumes nothing changed and keeps
+    /// showing the menu it already has.
+    menu_revision: Arc<Mutex<u32>>,
 }
 
 impl TrayIcon {
@@ -288,7 +436,7 @@ impl TrayIcon {
         index: u32,
         clicks: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<Self, TrayError> {
-        Self::build(item, None, index, clicks, None).await
+        Self::build(item, None, MenuServing::Popup, index, clicks, None).await
     }
 
     /// Registers an item that also has a right-click menu.
@@ -305,37 +453,67 @@ impl TrayIcon {
         clicks: tokio::sync::mpsc::UnboundedSender<String>,
         menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<Self, TrayError> {
-        Self::build(item, Some(menu), index, clicks, Some(menu_clicks)).await
+        Self::register_serving(item, menu, MenuServing::Popup, index, clicks, menu_clicks).await
+    }
+
+    /// [`Self::register_with_menu`], served the way `serving` says — the
+    /// popup, or a `com.canonical.dbusmenu` object the bar draws. See
+    /// [`crate::prefs::MenuMode`] for which to ask for.
+    pub async fn register_serving(
+        item: TrayItem,
+        menu: crate::menu::Menu,
+        serving: MenuServing,
+        index: u32,
+        clicks: tokio::sync::mpsc::UnboundedSender<String>,
+        menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<Self, TrayError> {
+        Self::build(item, Some(menu), serving, index, clicks, Some(menu_clicks)).await
     }
 
     async fn build(
         item: TrayItem,
         menu: Option<crate::menu::Menu>,
+        serving: MenuServing,
         index: u32,
         clicks: tokio::sync::mpsc::UnboundedSender<String>,
         menu_clicks: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<Self, TrayError> {
         let bus_name = format!("org.kde.StatusNotifierItem-{}-{}", std::process::id(), index);
+        let menu_declared = declares_menu(serving, menu.as_ref());
         let state = Arc::new(Mutex::new(item.clone()));
         let menu_state = menu.map(|m| Arc::new(Mutex::new(m)));
+        let menu_revision = Arc::new(Mutex::new(1u32));
 
-        // One object served at `ITEM_PATH` and nothing else — there used
-        // to be a second one, `com.canonical.dbusmenu` at `MENU_PATH`;
-        // see this crate's own module doc for why that no longer exists.
+        let inner = ItemInterface {
+            state: state.clone(),
+            menu: menu_state.clone(),
+            clicks,
+            menu_clicks: menu_clicks.clone(),
+        };
         let builder = zbus::connection::Builder::session()
             .map_err(classify)?
             .name(bus_name.as_str())
-            .map_err(classify)?
-            .serve_at(
-                ITEM_PATH,
-                ItemInterface {
-                    state: state.clone(),
-                    menu: menu_state.clone(),
-                    clicks,
-                    menu_clicks,
-                },
-            )
             .map_err(classify)?;
+        // The popup path serves one object, the item with no `Menu`. The
+        // dbusmenu path serves the item with a `Menu` and the menu object
+        // it names — on the same connection, because a host resolves the
+        // path against the item's own bus name.
+        let builder = match (&menu_state, &menu_clicks) {
+            (Some(menu), Some(events)) if menu_declared => builder
+                .serve_at(ITEM_PATH, ItemWithMenuInterface { inner })
+                .map_err(classify)?
+                .serve_at(
+                    MENU_PATH,
+                    crate::dbusmenu::MenuInterface::new(
+                        item.id.clone(),
+                        menu.clone(),
+                        menu_revision.clone(),
+                        events.clone(),
+                    ),
+                )
+                .map_err(classify)?,
+            _ => builder.serve_at(ITEM_PATH, inner).map_err(classify)?,
+        };
 
         let connection = builder.build().await.map_err(classify)?;
 
@@ -345,28 +523,76 @@ impl TrayIcon {
             state,
             last: Mutex::new(item),
             menu: menu_state,
+            serving,
+            menu_declared,
+            menu_revision,
         };
         icon.announce().await?;
         Ok(icon)
     }
 
-    /// Replaces this daemon's own record of the menu's content.
+    /// Gives up this item's bus name now, rather than whenever the last
+    /// reference to its connection is dropped.
     ///
-    /// Used to bump a revision and signal a host that its cached layout
-    /// was stale, back when a host could cache one at all. There is
-    /// nothing left to notify: `hyprforge-traymenu` is spawned fresh on
-    /// every right click and reads whatever this holds at that moment, so
-    /// replacing it here is the entire update. Still skips the write when
-    /// nothing changed, the same as before, since a `Mutex` a poll tick
-    /// never needs to touch is a poll tick that never contends with a
-    /// menu click reading it.
+    /// For an item about to be registered again under the same name — a
+    /// change of [`MenuServing`] — where a name still held by the old
+    /// connection would make the new registration fail.
+    pub async fn release(&self) {
+        if let Err(e) = self.connection.release_name(self.bus_name.as_str()).await {
+            tracing::warn!(error = %e, item = %self.bus_name, "could not release a tray item's bus name");
+        }
+    }
+
+    /// What this item was asked to be served as — see the field's doc.
+    pub fn serving(&self) -> MenuServing {
+        self.serving
+    }
+
+    /// Whether this item actually declares a `Menu` property.
+    pub fn menu_declared(&self) -> bool {
+        self.menu_declared
+    }
+
+    /// Replaces the menu's content.
+    ///
+    /// On the popup path that is the entire update: `hyprforge-traymenu`
+    /// is spawned fresh on every right click and reads whatever this
+    /// holds at that moment. On the dbusmenu path a bar caches the layout,
+    /// so a change also bumps the revision and emits `LayoutUpdated`, or
+    /// the bar keeps showing the menu it already has. Either way nothing
+    /// is written when nothing changed, since a poll tick calls this
+    /// every time.
+    ///
+    /// An empty menu never replaces a served dbusmenu layout — see
+    /// [`takes_menu_update`].
     pub async fn update_menu(&self, next: crate::menu::Menu) -> Result<(), TrayError> {
         let Some(menu) = &self.menu else {
             return Ok(());
         };
+        if !takes_menu_update(self.menu_declared, &next) {
+            tracing::warn!(
+                item = %self.bus_name,
+                "kept the last menu rather than serve an empty dbusmenu layout"
+            );
+            return Ok(());
+        }
         let mut current = menu.lock().await;
-        if *current != next {
-            *current = next;
+        if *current == next {
+            return Ok(());
+        }
+        *current = next;
+        drop(current);
+
+        if self.menu_declared {
+            let revision = {
+                let mut revision = self.menu_revision.lock().await;
+                *revision += 1;
+                *revision
+            };
+            let emitter = SignalEmitter::new(&self.connection, MENU_PATH).map_err(classify)?;
+            crate::dbusmenu::MenuInterface::layout_updated(&emitter, revision, 0)
+                .await
+                .map_err(classify)?;
         }
         Ok(())
     }
@@ -405,19 +631,42 @@ impl TrayIcon {
         *last = next.clone();
         drop(last);
 
+        // The two interface types carry the same interface name, so either
+        // emits the same signal; each is emitted through the type actually
+        // served, so neither declares a signal nothing sends.
+        let declared = self.menu_declared;
         if icon_changed {
-            ItemInterface::new_icon(&emitter).await.map_err(classify)?;
+            if declared {
+                ItemWithMenuInterface::new_icon(&emitter).await
+            } else {
+                ItemInterface::new_icon(&emitter).await
+            }
+            .map_err(classify)?;
         }
         if status_changed {
-            ItemInterface::new_status(&emitter, next.status.as_str())
-                .await
-                .map_err(classify)?;
+            let status = next.status.as_str();
+            if declared {
+                ItemWithMenuInterface::new_status(&emitter, status).await
+            } else {
+                ItemInterface::new_status(&emitter, status).await
+            }
+            .map_err(classify)?;
         }
         if title_changed {
-            ItemInterface::new_title(&emitter).await.map_err(classify)?;
+            if declared {
+                ItemWithMenuInterface::new_title(&emitter).await
+            } else {
+                ItemInterface::new_title(&emitter).await
+            }
+            .map_err(classify)?;
         }
         if tooltip_changed {
-            ItemInterface::new_tool_tip(&emitter).await.map_err(classify)?;
+            if declared {
+                ItemWithMenuInterface::new_tool_tip(&emitter).await
+            } else {
+                ItemInterface::new_tool_tip(&emitter).await
+            }
+            .map_err(classify)?;
         }
         Ok(())
     }
@@ -489,9 +738,8 @@ mod tests {
         assert_ne!(item(), changed);
     }
 
-    // --- `menu()`: the whole point of retiring `com.canonical.dbusmenu`
-    // is that a host never sees a path to ask about, whether or not this
-    // item actually has one recorded for `context_menu` to use.
+    // --- the popup path: no `Menu` property, whether or not this item
+    // has a menu recorded for `context_menu` to use.
 
     fn interface(menu: Option<crate::menu::Menu>) -> ItemInterface {
         let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -504,16 +752,12 @@ mod tests {
         }
     }
 
-    // The two tests that used to sit here asserted `menu()` answered
-    // `/`. There is no `menu()` any more — see the comment where the
-    // property used to be declared — and its absence is enforced by the
-    // compiler rather than by a test.
-    //
-    // What a *host* makes of that absence is the part worth checking,
-    // and it is not checkable here: it needs a real bar on a real bus.
-    // `tests/live_tray.rs` asserts the introspected interface carries no
-    // `Menu` property at all, which is the claim this crate makes about
-    // somebody else's code.
+    // `ItemInterface` has no `menu()` at all — see the comment where the
+    // property would sit — so its absence on the popup path is enforced
+    // by the compiler rather than by a test. What a *host* makes of it
+    // needs a real bar on a real bus: `tests/live_tray.rs` asserts the
+    // property cannot be read on the popup path and names a menu with
+    // rows on the dbusmenu path.
 
     /// `item_is_menu` must stay `false` regardless of whether a menu is
     /// recorded — this item's own primary action is still what a left
@@ -524,6 +768,49 @@ mod tests {
         assert!(
             !interface(Some(crate::menu::Menu::default())).item_is_menu().await
         );
+    }
+
+    /// The trap this module's `declares_menu` exists for, pinned: a
+    /// `Menu` property is declared only with rows behind it. An empty
+    /// layout behind a declared `Menu` is an empty four-pixel menu at the
+    /// pointer, and a bar that drew it never calls `ContextMenu`, so not
+    /// even the primary action runs.
+    #[test]
+    fn a_menu_property_is_declared_only_with_rows_behind_it() {
+        let rows = crate::menu::Menu::new(vec![crate::menu::MenuItem::standard("Settings…", "settings")]);
+        let empty = crate::menu::Menu::default();
+
+        assert!(declares_menu(MenuServing::Dbusmenu, Some(&rows)));
+        assert!(!declares_menu(MenuServing::Dbusmenu, Some(&empty)), "no rows, no Menu property");
+        assert!(!declares_menu(MenuServing::Dbusmenu, None), "no menu, no Menu property");
+        assert!(!declares_menu(MenuServing::Popup, Some(&rows)), "the popup path never declares one");
+    }
+
+    /// The same trap, met after registration: a served dbusmenu layout is
+    /// never replaced by an empty one. The popup path has no layout for a
+    /// bar to cache, so it takes whatever it is given.
+    #[test]
+    fn an_empty_menu_never_replaces_a_served_dbusmenu_layout() {
+        let rows = crate::menu::Menu::new(vec![crate::menu::MenuItem::standard("Settings…", "settings")]);
+        let empty = crate::menu::Menu::default();
+
+        assert!(!takes_menu_update(true, &empty));
+        assert!(takes_menu_update(true, &rows));
+        assert!(takes_menu_update(false, &empty), "nothing declared, nothing for a bar to draw empty");
+    }
+
+    /// Every member of the dbusmenu-path item answers what the popup-path
+    /// item answers — it is the same item with one more property — and
+    /// that property names the menu object.
+    #[tokio::test]
+    async fn the_dbusmenu_item_is_the_same_item_with_a_menu_path() {
+        let with_menu = ItemWithMenuInterface { inner: interface(Some(crate::menu::Menu::default())) };
+        let plain = interface(None);
+        assert_eq!(with_menu.id().await, plain.id().await);
+        assert_eq!(with_menu.icon_name().await, plain.icon_name().await);
+        assert_eq!(with_menu.tool_tip().await, plain.tool_tip().await);
+        assert!(!with_menu.item_is_menu().await);
+        assert_eq!(with_menu.menu().await.as_str(), MENU_PATH);
     }
 
     /// An item with no menu at all falls back to its primary action on a

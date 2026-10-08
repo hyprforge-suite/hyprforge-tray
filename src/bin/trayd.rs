@@ -24,6 +24,15 @@
 //! Passive item, and dropping is the only thing that reliably releases
 //! the bus name a host is showing.
 //!
+//! How a right click is served is `tray.toml`'s `menu`, asked every tick
+//! as well (`MenuMode::serving_here`): `hyprforge-traymenu` on Hyprland
+//! where it is installed, `com.canonical.dbusmenu` for the bar to draw
+//! everywhere else. Either way the menu and its actions are the same, and
+//! a click arrives on the same channel (`handle_menu_clicks`). A change of
+//! mode registers each shown icon again ([`IconAction::Reregister`]),
+//! because whether an item declares a `Menu` property is fixed when it
+//! registers.
+//!
 //! Every menu (`network_menu`, `bluetooth_menu`, `keep_awake_menu`,
 //! `night_light_menu`, `power_menu`, `displays_menu`) is built through
 //! `hyprforge_tray::menu::radio_menu`, which is the one shape all of them
@@ -63,7 +72,7 @@ use hyprforge_power::{
     PowerProfile, PowerProfilesBackend, PowerProfilesDaemonBackend, UPowerBackend, WhatSet,
 };
 use hyprforge_tray::menu::{radio_menu, Menu, MenuItem};
-use hyprforge_tray::prefs::{self, Prefs};
+use hyprforge_tray::prefs::{self, MenuServing, Prefs};
 use hyprforge_tray::{watcher_present, Category, TrayIcon, TrayItem};
 use hyprforge_tray::Status as TrayStatus;
 use std::sync::Arc;
@@ -188,6 +197,12 @@ async fn main() -> anyhow::Result<()> {
     // off is actually reflected before the ten-second tick would.
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    // Served the way `tray.toml` asks from the very first registration,
+    // so an item that should be dbusmenu is not registered as the popup
+    // and then registered again on the first tick. A file that will not
+    // parse is `poll_loop`'s to report; here it is the default, `auto`.
+    let serving = prefs::load().unwrap_or_default().menu.serving_here();
+
     // Registered unavailable-looking to start: the first real poll is at
     // most one `POLL_INTERVAL` away, and an icon that starts blank until
     // then would look identical to a daemon that never started. Both
@@ -199,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
         network_item(None, None, None, true),
         network_menu(None, None, true, &[], &[]),
         0,
+        serving,
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
     )
@@ -207,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         bluetooth_item(None, None, true),
         bluetooth_menu(None, true, &[]),
         1,
+        serving,
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
     )
@@ -215,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         keep_awake_item(None, &[], true),
         keep_awake_menu(None, &[], true),
         2,
+        serving,
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
     )
@@ -223,6 +241,7 @@ async fn main() -> anyhow::Result<()> {
         night_light_item(&NightLightState::CouldNotCheck),
         night_light_menu(&NightLightState::CouldNotCheck),
         3,
+        serving,
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
     )
@@ -232,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         power_item(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
         power_menu(&BatteryReading::Unavailable, &ProfileReading::Unavailable),
         4,
+        serving,
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
     )
@@ -241,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
         displays_item(&DisplaysReading::Unavailable, false),
         displays_menu(&DisplaysReading::Unavailable, false),
         5,
+        serving,
         clicks_tx.clone(),
         menu_clicks_tx.clone(),
     )
@@ -316,13 +337,15 @@ async fn register_with_retry(
     item: TrayItem,
     menu: Menu,
     index: u32,
+    serving: MenuServing,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
     menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Arc<TrayIcon> {
     loop {
-        match TrayIcon::register_with_menu(
+        match TrayIcon::register_serving(
             item.clone(),
             menu.clone(),
+            serving,
             index,
             clicks.clone(),
             menu_clicks.clone(),
@@ -812,13 +835,22 @@ enum IconAction {
     /// must be dropped — see the module doc for why `Status::Passive`
     /// alone does not reliably hide an item.
     Drop,
+    /// Wanted and registered, but served the other way from the one
+    /// `tray.toml` now asks for. Whether an item declares a `Menu`
+    /// property is fixed when it registers (`hyprforge_tray::sni`'s
+    /// module doc), so the only way to change it is to register again.
+    Reregister,
 }
 
-fn icon_action(wanted: bool, currently_up: bool) -> IconAction {
-    match (wanted, currently_up) {
-        (true, false) => IconAction::Register,
-        (false, true) => IconAction::Drop,
-        (true, true) | (false, false) => IconAction::Keep,
+/// `served` is what the registered item was asked to be served as
+/// (`None` when nothing is registered); `serving` is what the preference
+/// asks for now.
+fn icon_action(wanted: bool, served: Option<MenuServing>, serving: MenuServing) -> IconAction {
+    match (wanted, served) {
+        (true, None) => IconAction::Register,
+        (false, Some(_)) => IconAction::Drop,
+        (true, Some(served)) if served != serving => IconAction::Reregister,
+        (true, Some(_)) | (false, None) => IconAction::Keep,
     }
 }
 
@@ -872,18 +904,20 @@ fn refresh_prefs(current: &mut Prefs, warned: &mut bool) {
 
 /// Brings one icon's `IconSlot` in line with `wanted` and pushes this
 /// tick's content to it if it ends up (or stays) registered.
+#[allow(clippy::too_many_arguments)]
 async fn sync_icon(
     slot: &IconSlot,
     wanted: bool,
     item: TrayItem,
     menu: Menu,
     index: u32,
+    serving: MenuServing,
     clicks: &tokio::sync::mpsc::UnboundedSender<String>,
     menu_clicks: &tokio::sync::mpsc::UnboundedSender<String>,
 ) {
     let id = item.id.clone();
     let mut guard = slot.lock().await;
-    match icon_action(wanted, guard.is_some()) {
+    match icon_action(wanted, guard.as_ref().map(|icon| icon.serving()), serving) {
         IconAction::Keep => {
             if let Some(icon) = guard.as_ref() {
                 if let Err(e) = icon.update(item).await {
@@ -907,15 +941,38 @@ async fn sync_icon(
             // this whole feature exists to avoid; see the module doc.
             *guard = None;
         }
-        IconAction::Register => {
-            match TrayIcon::register_with_menu(item, menu, index, clicks.clone(), menu_clicks.clone())
-                .await
-            {
-                Ok(icon) => *guard = Some(Arc::new(icon)),
-                Err(e) => {
-                    tracing::warn!(error = %e, icon = %id, "failed to register tray icon; will retry next tick");
-                }
+        IconAction::Reregister => {
+            tracing::info!(icon = %id, ?serving, "tray menu mode changed; registering the icon again");
+            // Released explicitly before the old connection is dropped:
+            // the new registration asks for the same bus name, and a name
+            // the old connection still holds would refuse it.
+            if let Some(old) = guard.take() {
+                old.release().await;
             }
+            register_into(&mut guard, item, menu, index, serving, clicks, menu_clicks).await;
+        }
+        IconAction::Register => {
+            register_into(&mut guard, item, menu, index, serving, clicks, menu_clicks).await;
+        }
+    }
+}
+
+/// Registers one icon into its slot, or leaves the slot empty — so the
+/// next tick's [`icon_action`] answers `Register` and tries again.
+async fn register_into(
+    guard: &mut Option<Arc<TrayIcon>>,
+    item: TrayItem,
+    menu: Menu,
+    index: u32,
+    serving: MenuServing,
+    clicks: &tokio::sync::mpsc::UnboundedSender<String>,
+    menu_clicks: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    let id = item.id.clone();
+    match TrayIcon::register_serving(item, menu, serving, index, clicks.clone(), menu_clicks.clone()).await {
+        Ok(icon) => *guard = Some(Arc::new(icon)),
+        Err(e) => {
+            tracing::warn!(error = %e, icon = %id, "failed to register tray icon; will retry next tick");
         }
     }
 }
@@ -988,6 +1045,10 @@ async fn poll_loop(
         }
 
         refresh_prefs(&mut prefs, &mut prefs_load_failed);
+        // Asked every tick, not once: `auto`'s answer depends on whether
+        // `hyprforge-traymenu` is installed, and installing it while this
+        // daemon runs should switch to the popup without a restart.
+        let serving = prefs.menu.serving_here();
 
         // What each icon wants, and whether it is currently registered —
         // both settled before anything is sampled, because together they
@@ -1038,7 +1099,7 @@ async fn poll_loop(
         let ticks: [Option<(TrayItem, Menu)>; 6] = [net, bt, ka, nl, pw, dp];
         for ((icon, sampled), want) in icons.iter().zip(ticks).zip(wanted) {
             let Some((item, menu)) = sampled else { continue };
-            sync_icon(&icon.slot, want, item, menu, icon.index, &clicks, &menu_clicks).await;
+            sync_icon(&icon.slot, want, item, menu, icon.index, serving, &clicks, &menu_clicks).await;
         }
     }
 }
@@ -3019,18 +3080,36 @@ mod tests {
 
     #[test]
     fn a_wanted_icon_that_is_not_up_yet_should_be_registered() {
-        assert_eq!(icon_action(true, false), IconAction::Register);
+        assert_eq!(icon_action(true, None, MenuServing::Popup), IconAction::Register);
     }
 
     #[test]
     fn an_unwanted_icon_that_is_currently_up_should_be_dropped_not_left_registered() {
-        assert_eq!(icon_action(false, true), IconAction::Drop);
+        assert_eq!(icon_action(false, Some(MenuServing::Popup), MenuServing::Popup), IconAction::Drop);
     }
 
     #[test]
     fn an_icon_already_matching_the_preference_is_left_alone_either_way() {
-        assert_eq!(icon_action(true, true), IconAction::Keep);
-        assert_eq!(icon_action(false, false), IconAction::Keep);
+        assert_eq!(icon_action(true, Some(MenuServing::Popup), MenuServing::Popup), IconAction::Keep);
+        assert_eq!(icon_action(false, None, MenuServing::Popup), IconAction::Keep);
+    }
+
+    /// Whether an item declares a `Menu` property is fixed when it
+    /// registers, so a change of menu mode in `tray.toml` has to register
+    /// the icon again — in either direction.
+    #[test]
+    fn a_change_of_menu_mode_registers_a_shown_icon_again() {
+        assert_eq!(icon_action(true, Some(MenuServing::Popup), MenuServing::Dbusmenu), IconAction::Reregister);
+        assert_eq!(icon_action(true, Some(MenuServing::Dbusmenu), MenuServing::Popup), IconAction::Reregister);
+        assert_eq!(icon_action(true, Some(MenuServing::Dbusmenu), MenuServing::Dbusmenu), IconAction::Keep);
+    }
+
+    /// A hidden icon is not registered just to be served the new way,
+    /// and one being hidden is dropped whatever it was served as.
+    #[test]
+    fn a_change_of_menu_mode_never_brings_back_a_hidden_icon() {
+        assert_eq!(icon_action(false, None, MenuServing::Dbusmenu), IconAction::Keep);
+        assert_eq!(icon_action(false, Some(MenuServing::Popup), MenuServing::Dbusmenu), IconAction::Drop);
     }
 
     /// The one pair that needs no backend call at all — and the pair a
@@ -3082,7 +3161,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -3101,12 +3180,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");

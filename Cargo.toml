@@ -29,7 +29,8 @@ path = "src/bin/trayd.rs"
 # a binary cannot be fetched as a dependency the way a library can, so
 # it has to be inside this directory — the component's whole repository —
 # or the tray's repository ships a daemon whose menu does not exist. It
-# did, for a while. See repo-plan.md, "The shape a package has to have".
+# did, for a while. See the suite's docs/design/repo-plan.md,
+# "The shape a package has to have".
 [[bin]]
 name = "hyprforge-traymenu"
 path = "src/bin/traymenu/main.rs"

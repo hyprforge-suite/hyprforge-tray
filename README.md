@@ -10,6 +10,8 @@ Part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge), a suite of
 native Hyprland desktop apps — but it runs alone. Installing this gets
 you a tray daemon and the menu it draws, and nothing else.
 
+![Three tray menus side by side: Wi-Fi networks, Bluetooth devices, and battery with power profiles](https://raw.githubusercontent.com/hyprforge-suite/hyprforge/main/docs/images/tray.png)
+
 ## Why this needs no GTK or Qt
 
 A tray icon is a D-Bus object, not a widget drawn by a toolkit. This

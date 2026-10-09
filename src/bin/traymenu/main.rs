@@ -37,19 +37,13 @@
 
 mod app;
 mod layout;
+mod measure;
 mod view;
 
 use app::{MenuOutcome, TrayMenuApp};
 use hyprforge_popup::geometry::{Point, Size};
 use hyprforge_tray::menu::Menu;
 use layout::MenuLayout;
-
-/// Fixed width in logical pixels. A tray menu's rows are short labels
-/// ("Wi-Fi", "home", "Wi-Fi settings…"), never the free-form text a
-/// clipboard entry can be, so there is no case here analogous to
-/// `hyprforge-clipmenu`'s preview truncation — a width worth being
-/// generous with rather than tuning per menu.
-const POPUP_WIDTH: f64 = 220.0;
 
 /// The name this popup's single-instance lock is filed under — its own,
 /// distinct from `hyprforge-clipmenu.lock` and `hyprforge-emojimenu.lock`,
@@ -124,19 +118,31 @@ fn main() -> std::process::ExitCode {
     // `GetLayout` used to flatten a tree into — `layout.rs` and
     // `view.rs` both walk this same `Vec` in order, so a row's index
     // means the same thing everywhere it is used.
-    let rows: Vec<_> = menu.flatten().into_iter().cloned().collect();
+    let mut rows: Vec<_> = menu.flatten().into_iter().cloned().collect();
 
     let mut theme = hyprforge_appearance::look::resolve();
     theme.font_size = theme.drawable_font_size();
     let row_layout = MenuLayout::for_font_size(theme.font_size);
     let popup_height = row_layout.popup_height(&rows);
 
+    // As wide as the widest label, within `MenuLayout`'s bounds — then
+    // anything wider than that is cut to fit, measured, with an
+    // ellipsis. A separator's label is empty and measures nothing.
+    let widest = rows.iter().map(|r| measure::width(&r.label, theme.font_size)).fold(0.0, f64::max);
+    let popup_width = row_layout.popup_width(widest);
+    let available = row_layout.label_width(popup_width);
+    for row in &mut rows {
+        if let std::borrow::Cow::Owned(cut) = measure::fit(&row.label, theme.font_size, available) {
+            row.label = cut;
+        }
+    }
+
     let monitors = hyprforge_popup::monitors();
     if monitors.is_empty() {
         eprintln!("couldn't read any monitors from hyprctl — is Hyprland running?");
         return std::process::ExitCode::FAILURE;
     }
-    let popup_size = Size { width: POPUP_WIDTH, height: popup_height };
+    let popup_size = Size { width: popup_width, height: popup_height };
     // Never collapsed with "menu_y_offset is unreadable" turning into
     // silence — an unreadable `tray.toml` is already warned about by
     // `hyprforge-trayd`'s own poll loop every time it changes; this is

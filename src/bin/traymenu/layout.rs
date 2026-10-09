@@ -135,6 +135,24 @@ impl MenuLayout {
     pub fn label_width(&self, popup_width: f64) -> f64 {
         (popup_width - self.padding * 2.0 - Self::ROW_HPADDING * 2.0 - Self::CHECK_WIDTH).max(0.0)
     }
+
+    /// The narrowest the popup is drawn: what every menu was before the
+    /// width followed its labels, so a menu of short rows looks as it
+    /// always did.
+    pub const MIN_WIDTH: f64 = 220.0;
+    /// The widest. A network named in a paragraph is still cut, at a
+    /// width a menu hanging from a bar can reasonably take.
+    pub const MAX_WIDTH: f64 = 360.0;
+
+    /// The popup's width for a menu whose widest label measures
+    /// `widest_label` — exactly [`Self::label_width`] run backwards, so
+    /// a label that width fits uncut, within [`Self::MIN_WIDTH`] and
+    /// [`Self::MAX_WIDTH`]. Rounded up to a whole pixel: the measurement
+    /// is fractional and the surface is not.
+    pub fn popup_width(&self, widest_label: f64) -> f64 {
+        let wanted = widest_label + self.padding * 2.0 + Self::ROW_HPADDING * 2.0 + Self::CHECK_WIDTH;
+        wanted.ceil().clamp(Self::MIN_WIDTH, Self::MAX_WIDTH)
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +255,24 @@ mod tests {
         let layout = MenuLayout::for_font_size(15.0);
         assert_eq!(layout.label_width(0.0), 0.0);
         assert_eq!(layout.label_width(-100.0), 0.0);
+    }
+
+    #[test]
+    fn a_label_the_popup_was_sized_for_fits_in_it() {
+        let layout = MenuLayout::for_font_size(15.0);
+        for widest in [120.0, 233.4, 250.0] {
+            let width = layout.popup_width(widest);
+            assert!(layout.label_width(width) >= widest, "{widest} in a {width} popup");
+            assert_eq!(width, width.round(), "a whole pixel");
+        }
+    }
+
+    #[test]
+    fn short_menus_keep_the_old_width_and_long_ones_stop_growing() {
+        let layout = MenuLayout::for_font_size(15.0);
+        assert_eq!(layout.popup_width(10.0), MenuLayout::MIN_WIDTH);
+        assert_eq!(layout.popup_width(0.0), MenuLayout::MIN_WIDTH);
+        assert_eq!(layout.popup_width(5_000.0), MenuLayout::MAX_WIDTH);
     }
 
     #[test]

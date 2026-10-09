@@ -66,9 +66,9 @@ impl PopupApp for TrayMenuApp {
         &'a mut self,
         theme: &'a Theme,
         _now: u64,
-        width: f64,
+        _width: f64,
     ) -> Element<'a, Infallible, iced_widget::Theme, iced_tiny_skia::Renderer> {
-        let rows = view::rows(&self.rows, &self.layout, self.hovered, theme, width);
+        let rows = view::rows(&self.rows, &self.layout, self.hovered, theme);
         let popup_border = theme.accent;
         let popup_radius = theme.corner_radius();
         let root_background = theme.surfaces.root;

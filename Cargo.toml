@@ -1,6 +1,6 @@
 [package]
 name = "hyprforge-tray"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 license = "MIT"
 # Both menu paths are named: hyprforge-traymenu where it can run, and

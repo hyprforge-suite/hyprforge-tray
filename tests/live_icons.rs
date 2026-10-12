@@ -247,7 +247,7 @@ fn installed_theme_chain(root: &str) -> Vec<String> {
 
 /// The claim: every name this daemon can emit draws something.
 #[test]
-#[ignore]
+#[ignore = "live (the installed icon theme): changes nothing"]
 fn every_icon_this_daemon_can_emit_resolves_in_the_configured_theme() {
     let Some(theme) = configured_theme() else {
         eprintln!("{SKIP_MARKER} no icon theme configured in gsettings to resolve against");
@@ -326,7 +326,7 @@ fn every_icon_this_daemon_can_emit_is_symbolic_unless_it_is_a_shared_fallback() 
 /// choice only resolves through a deeper fallback, this fails and says
 /// which theme actually answered for it.
 #[test]
-#[ignore]
+#[ignore = "live (the installed icon theme): changes nothing"]
 fn every_symbolic_icon_this_daemon_can_emit_resolves_in_the_same_installed_theme() {
     let Some(theme) = configured_theme() else {
         eprintln!("{SKIP_MARKER} no icon theme configured in gsettings to resolve against");

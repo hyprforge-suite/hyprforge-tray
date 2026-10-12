@@ -36,7 +36,7 @@ fn item(id: &str) -> TrayItem {
 
 /// The claim everything else rests on: a bar accepts this registration.
 #[tokio::test]
-#[ignore]
+#[ignore = "visible (a tray host): briefly visible, then undone"]
 async fn a_running_tray_host_accepts_the_item_this_crate_registers() {
     let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
     match TrayIcon::register(item("hyprforge-network"), 90, clicks).await {
@@ -55,7 +55,7 @@ async fn a_running_tray_host_accepts_the_item_this_crate_registers() {
 /// call and drop the item — for a malformed bus name, say — so this asks
 /// the watcher what it actually holds.
 #[tokio::test]
-#[ignore]
+#[ignore = "visible (a tray host): briefly visible, then undone"]
 async fn the_watcher_lists_the_item_after_it_registers() {
     let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
     let icon = match TrayIcon::register(item("hyprforge-bluetooth"), 91, clicks).await {
@@ -96,7 +96,7 @@ async fn the_watcher_lists_the_item_after_it_registers() {
 /// Updating must not require re-registering, and must not error when
 /// nothing changed — the daemon calls this on every poll tick.
 #[tokio::test]
-#[ignore]
+#[ignore = "visible (a tray host): briefly visible, then undone"]
 async fn an_update_reaches_the_host_and_an_unchanged_one_is_cheap() {
     let (clicks, _rx) = tokio::sync::mpsc::unbounded_channel();
     let icon = match TrayIcon::register(item("hyprforge-network"), 92, clicks).await {
@@ -127,7 +127,7 @@ async fn an_update_reaches_the_host_and_an_unchanged_one_is_cheap() {
 /// spec-compliant bar draws its own menu instead of calling
 /// `ContextMenu`, and the popup never opens.
 #[tokio::test]
-#[ignore]
+#[ignore = "visible (a tray host): briefly visible, then undone"]
 async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
     use hyprforge_tray::menu::{Menu, MenuItem};
 
@@ -213,7 +213,7 @@ async fn an_item_registered_with_a_menu_still_advertises_no_menu_over_d_bus() {
 /// back the way a bar would: the property first, then the layout at the
 /// path the property names.
 #[tokio::test]
-#[ignore]
+#[ignore = "visible (a tray host): briefly visible, then undone"]
 async fn an_item_served_as_dbusmenu_names_a_menu_with_rows_in_it() {
     use hyprforge_tray::menu::{Menu, MenuItem};
     use hyprforge_tray::MenuServing;

@@ -37,6 +37,7 @@
 
 mod app;
 mod layout;
+mod levels;
 mod measure;
 mod view;
 
@@ -44,6 +45,7 @@ use app::{MenuOutcome, TrayMenuApp};
 use hyprforge_popup::geometry::{Point, Size};
 use hyprforge_tray::menu::Menu;
 use layout::MenuLayout;
+use levels::Levels;
 
 /// The name this popup's single-instance lock is filed under — its own,
 /// distinct from `hyprforge-clipmenu.lock` and `hyprforge-emojimenu.lock`,
@@ -114,28 +116,36 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    // Depth-first, the same order `com.canonical.dbusmenu`'s own
-    // `GetLayout` used to flatten a tree into — `layout.rs` and
-    // `view.rs` both walk this same `Vec` in order, so a row's index
-    // means the same thing everywhere it is used.
-    let mut rows: Vec<_> = menu.flatten().into_iter().cloned().collect();
+    // Every row of the tree, depth-first, with who holds whom: a
+    // submenu opens in place (`levels.rs`), and the outcome names a row
+    // by its place in this list.
+    let mut levels = Levels::new(&menu);
 
     let mut theme = hyprforge_appearance::look::resolve();
     theme.font_size = theme.drawable_font_size();
     let row_layout = MenuLayout::for_font_size(theme.font_size);
-    let popup_height = row_layout.popup_height(&rows);
+    // Sized once, for the tallest level, so opening a submenu never has
+    // to resize a surface the compositor has already placed.
+    let popup_height = levels.all().map(|level| row_layout.popup_height(&levels.rows(level).0)).fold(0.0, f64::max);
 
-    // As wide as the widest label, within `MenuLayout`'s bounds — then
+    // As wide as the widest label at any level — a row that opens a
+    // submenu counting its mark — within `MenuLayout`'s bounds; then
     // anything wider than that is cut to fit, measured, with an
     // ellipsis. A separator's label is empty and measures nothing.
-    let widest = rows.iter().map(|r| measure::width(&r.label, theme.font_size)).fold(0.0, f64::max);
+    let mark = measure::width(&format!(" {}", view::SUBMENU_MARK), theme.font_size);
+    let widest = (0..levels.flat.len())
+        .map(|i| measure::width(&levels.flat[i].label, theme.font_size) + if levels.opens(i) { mark } else { 0.0 })
+        .chain(std::iter::once(measure::width(levels::BACK, theme.font_size)))
+        .fold(0.0, f64::max);
     let popup_width = row_layout.popup_width(widest);
     let available = row_layout.label_width(popup_width);
-    for row in &mut rows {
-        if let std::borrow::Cow::Owned(cut) = measure::fit(&row.label, theme.font_size, available) {
-            row.label = cut;
+    for i in 0..levels.flat.len() {
+        let room = if levels.opens(i) { available - mark } else { available };
+        if let std::borrow::Cow::Owned(cut) = measure::fit(&levels.flat[i].label, theme.font_size, room.max(0.0)) {
+            levels.flat[i].label = cut;
         }
     }
+    let flat = levels.flat.clone();
 
     let monitors = hyprforge_popup::monitors();
     if monitors.is_empty() {
@@ -182,7 +192,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let app = TrayMenuApp::new(rows.clone(), row_layout, dismissal);
+    let app = TrayMenuApp::new(levels, row_layout, dismissal);
 
     match hyprforge_popup::Popup::run(connection, placement, app, theme) {
         Ok(hyprforge_popup::Outcome::App(MenuOutcome::Chosen(index))) => {
@@ -191,7 +201,7 @@ fn main() -> std::process::ExitCode {
             // unreachable since `pointer_click`/`key` only ever return an
             // index `layout::MenuLayout` itself resolved) prints nothing,
             // which the daemon already treats as "nothing was chosen".
-            if let Some(action) = rows.get(index).and_then(|row| row.action.as_deref()) {
+            if let Some(action) = flat.get(index).and_then(|row| row.action.as_deref()) {
                 println!("{action}");
             }
             std::process::ExitCode::SUCCESS

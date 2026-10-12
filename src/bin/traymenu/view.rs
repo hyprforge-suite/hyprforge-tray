@@ -18,8 +18,12 @@ pub fn to_iced(c: hyprforge_look::Color) -> iced_runtime::core::Color {
 /// Builds every row — separators included — in the same top-to-bottom
 /// order `MenuLayout::row_at` walks, so a hover or a click resolved
 /// against one index always names the row drawn at that same position.
+///
+/// `opens[i]` marks a row that opens a submenu, which gets a `›` at its
+/// right edge — the mark every menu uses for "there is more in here".
 pub fn rows<'a, Message: 'a>(
     items: &'a [MenuItem],
+    opens: &[bool],
     layout: &MenuLayout,
     hovered: Option<usize>,
     theme: &'a Theme,
@@ -27,12 +31,18 @@ pub fn rows<'a, Message: 'a>(
     items
         .iter()
         .enumerate()
-        .map(|(index, item)| row_element(item, layout, Some(index) == hovered, theme))
+        .map(|(index, item)| {
+            row_element(item, opens.get(index).copied().unwrap_or(false), layout, Some(index) == hovered, theme)
+        })
         .collect()
 }
 
+/// The mark on a row that opens a submenu.
+pub const SUBMENU_MARK: &str = "\u{203A}";
+
 fn row_element<'a, Message: 'a>(
     item: &'a MenuItem,
+    opens: bool,
     layout: &MenuLayout,
     hovered: bool,
     theme: &'a Theme,
@@ -86,7 +96,13 @@ fn row_element<'a, Message: 'a>(
     let label: Element<'a, Message, iced_widget::Theme, iced_tiny_skia::Renderer> =
         text(item.label.as_str()).size(theme.font_size).wrapping(Wrapping::None).color(text_color).into();
 
-    let content = row![check, label].align_y(iced_runtime::core::alignment::Vertical::Center);
+    let mark: Element<'a, Message, iced_widget::Theme, iced_tiny_skia::Renderer> = if opens {
+        text(SUBMENU_MARK).size(theme.font_size).color(text_color).into()
+    } else {
+        Space::new().width(Length::Fixed(0.0)).into()
+    };
+    let content = row![check, label, Space::new().width(Length::Fill), mark]
+        .align_y(iced_runtime::core::alignment::Vertical::Center);
 
     let background = if hovered && clickable { Some(to_iced(theme.accent).scale_alpha(0.18)) } else { None };
 

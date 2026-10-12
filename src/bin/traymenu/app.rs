@@ -11,15 +11,16 @@ use iced_widget::{column, container};
 use std::convert::Infallible;
 
 use crate::layout::MenuLayout;
+use crate::levels::{Levels, Shown};
 use crate::view;
 
 /// However this popup ended — see [`hyprforge_popup::Outcome::App`].
 ///
-/// `Chosen` carries the row's *index* rather than its
+/// `Chosen` carries the row's index in [`Levels::flat`] rather than its
 /// [`MenuItem::action`] string directly, because [`PopupApp::Outcome`]
-/// must be `Copy` — a `String` cannot be. `main.rs` keeps its own copy of
-/// `rows` outside the app for exactly this reason, and reads
-/// `rows[index].action` once [`hyprforge_popup::Popup::run`] returns.
+/// must be `Copy` — a `String` cannot be. `main.rs` keeps the flattened
+/// rows outside the app for exactly this reason, and reads
+/// `flat[index].action` once [`hyprforge_popup::Popup::run`] returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuOutcome {
     Chosen(usize),
@@ -27,7 +28,14 @@ pub enum MenuOutcome {
 }
 
 pub struct TrayMenuApp {
+    levels: Levels,
+    /// Which submenu is open: `None` is the top level.
+    level: Option<usize>,
+    /// The open level's rows as drawn, and what each one is — rebuilt
+    /// whenever the level changes, so hit-testing and drawing read one
+    /// list.
     rows: Vec<MenuItem>,
+    shown: Vec<Shown>,
     layout: MenuLayout,
     hovered: Option<usize>,
     /// What a click outside this menu should do — the user's own
@@ -46,8 +54,39 @@ impl TrayMenuApp {
     /// is different — `view.rs::row_element` now uses it (via
     /// `MenuLayout::label_width`) to truncate a long label before it
     /// draws, so that one *is* read.
-    pub fn new(rows: Vec<MenuItem>, layout: MenuLayout, dismissal: Dismissal) -> Self {
-        TrayMenuApp { rows, layout, hovered: None, dismissal }
+    pub fn new(levels: Levels, layout: MenuLayout, dismissal: Dismissal) -> Self {
+        let (rows, shown) = levels.rows(None);
+        TrayMenuApp { levels, level: None, rows, shown, layout, hovered: None, dismissal }
+    }
+
+    /// Shows `level`, with the highlight on its first row when the
+    /// keyboard got there, and on nothing when the pointer did — the
+    /// pointer is about to say where it is anyway.
+    fn open(&mut self, level: Option<usize>, by_keyboard: bool) {
+        self.level = level;
+        (self.rows, self.shown) = self.levels.rows(level);
+        self.hovered = if by_keyboard { next_clickable(&self.rows, None) } else { None };
+    }
+
+    /// What choosing row `index` of the open level does: end with it,
+    /// or move to another level and keep going.
+    fn choose(&mut self, index: usize, by_keyboard: bool) -> Option<MenuOutcome> {
+        match self.shown.get(index)? {
+            Shown::Back => {
+                self.open(self.levels.up(self.level), by_keyboard);
+                None
+            }
+            &Shown::Item(flat) if self.levels.opens(flat) => {
+                self.open(Some(flat), by_keyboard);
+                None
+            }
+            &Shown::Item(flat) => Some(MenuOutcome::Chosen(flat)),
+        }
+    }
+
+    /// Which rows of the open level open a submenu, for the mark.
+    fn opens(&self) -> Vec<bool> {
+        self.shown.iter().map(|s| matches!(*s, Shown::Item(f) if self.levels.opens(f))).collect()
     }
 }
 
@@ -68,7 +107,8 @@ impl PopupApp for TrayMenuApp {
         _now: u64,
         _width: f64,
     ) -> Element<'a, Infallible, iced_widget::Theme, iced_tiny_skia::Renderer> {
-        let rows = view::rows(&self.rows, &self.layout, self.hovered, theme);
+        let opens = self.opens();
+        let rows = view::rows(&self.rows, &opens, &self.layout, self.hovered, theme);
         let popup_border = theme.accent;
         let popup_radius = theme.corner_radius();
         let root_background = theme.surfaces.root;
@@ -108,7 +148,8 @@ impl PopupApp for TrayMenuApp {
     }
 
     fn pointer_click(&mut self, _theme: &Theme, _width: f64, position: (f64, f64)) -> Option<Self::Outcome> {
-        self.layout.row_at(&self.rows, position.1).map(MenuOutcome::Chosen)
+        let index = self.layout.row_at(&self.rows, position.1)?;
+        self.choose(index, false)
     }
 
     fn pointer_scroll(&mut self, _rows: i32) {
@@ -119,7 +160,22 @@ impl PopupApp for TrayMenuApp {
         match keysym {
             Keysym::Escape => Some(MenuOutcome::Cancelled),
             Keysym::Return | Keysym::KP_Enter => {
-                self.hovered.filter(|&index| MenuLayout::is_clickable(&self.rows[index])).map(MenuOutcome::Chosen)
+                let index = self.hovered.filter(|&index| MenuLayout::is_clickable(&self.rows[index]))?;
+                self.choose(index, true)
+            }
+            // Into a submenu from the row that opens it, and back out.
+            Keysym::Right => {
+                let index = self.hovered?;
+                match self.shown.get(index) {
+                    Some(&Shown::Item(flat)) if self.levels.opens(flat) && self.rows[index].enabled => self.choose(index, true),
+                    _ => None,
+                }
+            }
+            Keysym::Left | Keysym::BackSpace => {
+                if self.level.is_some() {
+                    self.open(self.levels.up(self.level), true);
+                }
+                None
             }
             Keysym::Up => {
                 self.hovered = previous_clickable(&self.rows, self.hovered);
@@ -164,20 +220,57 @@ mod tests {
     use super::*;
     use hyprforge_tray::menu::Menu;
 
-    fn rows() -> Vec<MenuItem> {
+    fn menu() -> Menu {
         Menu::new(vec![
             MenuItem::checkmark("Wi-Fi", true, "wifi:radio:off"),
             MenuItem::separator(),
             MenuItem::standard("home", "wifi:connect:home"),
             MenuItem::disabled("guest (enterprise)"),
         ])
-        .items
+    }
+
+    fn rows() -> Vec<MenuItem> {
+        menu().items
+    }
+
+    fn app() -> TrayMenuApp {
+        TrayMenuApp::new(Levels::new(&menu()), MenuLayout::for_font_size(15.0), Dismissal::CloseOnFocusLoss)
+    }
+
+    /// A menu with a submenu: a click on its row opens it rather than
+    /// ending, its children are chosen by their place in the whole tree,
+    /// and Back — or Left — returns to the top.
+    #[test]
+    fn a_submenu_opens_in_place_and_back_returns() {
+        let mut more = MenuItem::standard("More", "unused");
+        more.action = None;
+        more.children = vec![MenuItem::standard("Deep", "deep")];
+        let menu = Menu::new(vec![MenuItem::standard("Top", "top"), more]);
+        let layout = MenuLayout::for_font_size(15.0);
+        let mut app = TrayMenuApp::new(Levels::new(&menu), layout, Dismissal::CloseOnFocusLoss);
+        let row = |app: &TrayMenuApp, i| layout.padding + layout.row_top(&app.rows, i) + 2.0;
+
+        let more_at = row(&app, 1);
+        assert_eq!(app.pointer_click(&Theme::default(), 220.0, (10.0, more_at)), None, "opens, doesn't end");
+        assert_eq!(app.rows[0].label, crate::levels::BACK);
+        let deep_at = row(&app, 1);
+        assert_eq!(app.pointer_click(&Theme::default(), 220.0, (10.0, deep_at)), Some(MenuOutcome::Chosen(2)));
+
+        let back_at = row(&app, 0);
+        assert_eq!(app.pointer_click(&Theme::default(), 220.0, (10.0, back_at)), None);
+        assert_eq!(app.rows[0].label, "Top", "back at the top");
+
+        app.hovered = Some(1);
+        assert_eq!(app.key(Keysym::Right, None, Modifiers::default()), None);
+        assert_eq!(app.hovered, Some(0), "the keyboard lands on the level's first row");
+        assert_eq!(app.key(Keysym::Left, None, Modifiers::default()), None);
+        assert_eq!(app.rows[0].label, "Top");
     }
 
     #[test]
     fn a_click_on_a_separator_resolves_to_nothing_rather_than_the_nearest_row() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
+        let mut app = app();
         let sep_top = layout.padding + layout.row_top(&rows(), 1);
         assert_eq!(
             app.pointer_click(&Theme::default(), 220.0, (10.0, sep_top + 2.0)),
@@ -188,7 +281,7 @@ mod tests {
     #[test]
     fn a_click_on_an_enabled_row_chooses_its_index() {
         let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
+        let mut app = app();
         let top = layout.padding + layout.row_top(&rows(), 2);
         assert_eq!(
             app.pointer_click(&Theme::default(), 220.0, (10.0, top + 2.0)),
@@ -198,15 +291,13 @@ mod tests {
 
     #[test]
     fn escape_cancels_regardless_of_hover_state() {
-        let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
+        let mut app = app();
         assert_eq!(app.key(Keysym::Escape, None, Modifiers::default()), Some(MenuOutcome::Cancelled));
     }
 
     #[test]
     fn down_then_enter_chooses_the_first_clickable_row_skipping_the_separator() {
-        let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
+        let mut app = app();
         assert_eq!(app.key(Keysym::Down, None, Modifiers::default()), None);
         assert_eq!(app.hovered, Some(0), "row 0 is the first clickable row");
         assert_eq!(app.key(Keysym::Return, None, Modifiers::default()), Some(MenuOutcome::Chosen(0)));
@@ -214,8 +305,7 @@ mod tests {
 
     #[test]
     fn down_navigation_skips_the_separator_and_the_disabled_row() {
-        let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
+        let mut app = app();
         app.hovered = Some(0);
         assert_eq!(app.key(Keysym::Down, None, Modifiers::default()), None);
         assert_eq!(app.hovered, Some(2), "index 1 is a separator, so this must land on 2");
@@ -223,8 +313,7 @@ mod tests {
 
     #[test]
     fn enter_with_nothing_hovered_does_nothing() {
-        let layout = MenuLayout::for_font_size(15.0);
-        let mut app = TrayMenuApp::new(rows(), layout, Dismissal::CloseOnFocusLoss);
+        let mut app = app();
         assert_eq!(app.key(Keysym::Return, None, Modifiers::default()), None);
     }
 }

@@ -147,7 +147,19 @@ const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// does not exist at this size.
 const PREFS_WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
-#[tokio::main]
+/// One thread, not one per core. Idle, this daemon asks six services
+/// for their state every ten seconds, and on the default multi-threaded
+/// runtime those few D-Bus round trips were passed between five of its
+/// sixteen workers: about 560 wakeups a burst, 56 a second on average,
+/// measured from each thread's `schedstat` with nothing changing. Every
+/// wakeup is a core pulled out of idle, which is the one thing a tray
+/// icon must not cost a laptop. Nothing here needs parallelism: the
+/// processes it starts go through `tokio::process`, and the one
+/// synchronous call (`hyprctl`, for night light) already runs in
+/// `spawn_blocking`, which a current-thread runtime still has. Keep
+/// awake's holder runs this same `main`, and was sixteen workers holding
+/// one lock.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // Keep awake's holder: this binary run only to hold the inhibit — see
     // `keep_awake_backend`. Before anything else, and before registering

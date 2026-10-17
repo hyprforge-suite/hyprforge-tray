@@ -111,11 +111,25 @@ impl ManagedIcon {
     }
 }
 
-/// How often both backends are re-polled. Ten seconds is what the
-/// Settings app's Network and Bluetooth screens already poll at while
-/// open — matching it means the tray icon and an open Settings window
-/// never visibly disagree for long.
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// How often every backend is read regardless. Changes arrive as they
+/// happen now — [`watch_signals`] refreshes the one icon a service's
+/// signal is about — so this is the fallback for what sends none:
+/// night light (hyprsunset has no bus) and keep awake (logind signals
+/// no change to its inhibitors). It was ten seconds, every backend every
+/// time: six D-Bus round trips a tick, 36 a minute, on a machine whose
+/// services sent 4 signals in 30 s while idle (measured 2026-10-17).
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Which icons a refresh is for, one bit each, in `poll_loop`'s order.
+type Backends = u8;
+const NETWORK: Backends = 1 << 0;
+const BLUETOOTH: Backends = 1 << 1;
+const KEEP_AWAKE: Backends = 1 << 2;
+const NIGHT_LIGHT: Backends = 1 << 3;
+const POWER: Backends = 1 << 4;
+const DISPLAYS: Backends = 1 << 5;
+/// Every icon: the fallback tick, a menu opened, `tray.toml` changed.
+const ALL: Backends = 0b11_1111;
 
 /// How often a failed `TrayIcon::register` or a not-yet-present watcher
 /// is retried. Short enough that a bar starting up is followed quickly,
@@ -311,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
         revert_deadline.clone(),
     ));
     let revert_task = tokio::spawn(watch_display_reverts(revert_deadline, refresh_tx.clone()));
+    let signals_task = tokio::spawn(watch_signals(refresh_tx.clone()));
     let prefs_watch_task = tokio::spawn(prefs_watch_loop(refresh_tx));
     let reannounce_task = tokio::spawn(reannounce_loop(probe, icons));
 
@@ -324,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         r = menu_click_task => log_task_exit("menu-clicks", r),
         r = reannounce_task => log_task_exit("reannounce", r),
         r = prefs_watch_task => log_task_exit("prefs-watch", r),
+        r = signals_task => log_task_exit("signals", r),
         r = revert_task => log_task_exit("display-reverts", r),
     }
 
@@ -721,21 +737,21 @@ async fn sample_displays(
 fn set_revert_deadline(
     deadline: &RevertDeadline,
     seconds: u32,
-    refresh: &tokio::sync::mpsc::UnboundedSender<()>,
+    refresh: &tokio::sync::mpsc::UnboundedSender<Backends>,
 ) {
     let wait = Duration::from_secs(u64::from(seconds));
     *deadline.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokio::time::Instant::now() + wait);
-    let _ = refresh.send(());
+    let _ = refresh.send(DISPLAYS);
     let refresh = refresh.clone();
     tokio::spawn(async move {
         tokio::time::sleep(wait + Duration::from_secs(1)).await;
-        let _ = refresh.send(());
+        let _ = refresh.send(DISPLAYS);
     });
 }
 
-fn clear_revert_deadline(deadline: &RevertDeadline, refresh: &tokio::sync::mpsc::UnboundedSender<()>) {
+fn clear_revert_deadline(deadline: &RevertDeadline, refresh: &tokio::sync::mpsc::UnboundedSender<Backends>) {
     *deadline.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    let _ = refresh.send(());
+    let _ = refresh.send(DISPLAYS);
 }
 
 /// Follows displayd's revert signals for as long as this daemon runs.
@@ -746,7 +762,7 @@ fn clear_revert_deadline(deadline: &RevertDeadline, refresh: &tokio::sync::mpsc:
 /// subscribed, whether or not the icon is shown — a match rule costs
 /// nothing while no signal arrives, and subscribing only once the icon
 /// is switched on would miss a countdown already running.
-async fn watch_display_reverts(deadline: RevertDeadline, refresh: tokio::sync::mpsc::UnboundedSender<()>) {
+async fn watch_display_reverts(deadline: RevertDeadline, refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
     loop {
         if let Err(e) = follow_display_reverts(&deadline, &refresh).await {
             tracing::debug!(error = %e, "not following displayd's revert signals; will retry");
@@ -757,7 +773,7 @@ async fn watch_display_reverts(deadline: RevertDeadline, refresh: tokio::sync::m
 
 async fn follow_display_reverts(
     deadline: &RevertDeadline,
-    refresh: &tokio::sync::mpsc::UnboundedSender<()>,
+    refresh: &tokio::sync::mpsc::UnboundedSender<Backends>,
 ) -> anyhow::Result<()> {
     let conn = match tokio::time::timeout(DISPLAYD_CALL_TIMEOUT, zbus::Connection::session()).await {
         Ok(result) => result?,
@@ -1002,7 +1018,91 @@ fn prefs_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
 }
 
 /// Pulls the next poll forward the moment the preference file changes.
-async fn prefs_watch_loop(refresh: tokio::sync::mpsc::UnboundedSender<()>) {
+/// The system bus's signals that mean an icon is out of date: sender,
+/// interface, member, and the icon. power-profiles-daemon answers to two
+/// names — the newer `org.freedesktop.UPower.PowerProfiles` and the old
+/// `net.hadess.PowerProfiles`, both owned here — so both are heard.
+const SIGNALS: [(&str, &str, &str, Backends); 7] = [
+    ("org.freedesktop.NetworkManager", "org.freedesktop.DBus.Properties", "PropertiesChanged", NETWORK),
+    ("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged", BLUETOOTH),
+    ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded", BLUETOOTH),
+    ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved", BLUETOOTH),
+    ("org.freedesktop.UPower", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
+    ("org.freedesktop.UPower.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
+    ("net.hadess.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
+];
+
+/// The match rule for one subscription.
+fn signal_rule(sender: &'static str, interface: Option<&'static str>, member: Option<&'static str>) -> Result<zbus::MatchRule<'static>, zbus::Error> {
+    let mut rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(sender)?;
+    if let Some(i) = interface {
+        rule = rule.interface(i)?;
+    }
+    if let Some(m) = member {
+        rule = rule.member(m)?;
+    }
+    Ok(rule.build())
+}
+
+/// Refreshes an icon the moment its service says something changed,
+/// rather than at the next poll: `PropertiesChanged` from NetworkManager,
+/// BlueZ (and a device added or removed), UPower and power-profiles-
+/// daemon on the system bus, and any signal displayd sends on the
+/// session's. Subscribed as an ordinary client — a match rule on the
+/// sender's well-known name, which the bus follows across a restart.
+///
+/// Each signal refreshes only its own icon. Refreshing every icon per
+/// signal would have cost as much as the poll it replaced: idle, these
+/// services sent 4 signals in 30 s here, against the poll's 3 passes.
+/// A bus that can't be reached is tried again later; a service that
+/// isn't running simply sends nothing, and the fallback poll still
+/// reads it.
+async fn watch_signals(refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
+    async fn listen(
+        conn: zbus::Connection,
+        sender: &'static str,
+        interface: Option<&'static str>,
+        member: Option<&'static str>,
+        which: Backends,
+        refresh: tokio::sync::mpsc::UnboundedSender<Backends>,
+    ) -> Result<(), zbus::Error> {
+        let mut stream = zbus::MessageStream::for_match_rule(signal_rule(sender, interface, member)?, &conn, Some(16)).await?;
+        while stream.next().await.is_some() {
+            if refresh.send(which).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+    loop {
+        let mut tasks = Vec::new();
+        match zbus::Connection::system().await {
+            Ok(conn) => {
+                for (sender, interface, member, which) in SIGNALS {
+                    tasks.push(tokio::spawn(listen(conn.clone(), sender, Some(interface), Some(member), which, refresh.clone())));
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, "system bus unreachable; icons follow the poll alone"),
+        }
+        match zbus::Connection::session().await {
+            Ok(conn) => tasks.push(tokio::spawn(listen(conn, "dev.hyprforge.Displayd", None, None, DISPLAYS, refresh.clone()))),
+            Err(e) => tracing::debug!(error = %e, "session bus unreachable"),
+        }
+        // A listener ends only when its bus does; try again after a
+        // while rather than spinning.
+        for task in tasks {
+            if let Ok(Err(e)) = task.await {
+                tracing::debug!(error = %e, "a signal subscription ended");
+            }
+        }
+        if refresh.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+}
+
+async fn prefs_watch_loop(refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
     let path = hyprforge_tray::prefs::path();
     let mut seen = prefs_stamp(&path);
     let mut ticker = tokio::time::interval(PREFS_WATCH_INTERVAL);
@@ -1015,7 +1115,7 @@ async fn prefs_watch_loop(refresh: tokio::sync::mpsc::UnboundedSender<()>) {
         seen = now;
         // A closed channel means the poll loop is gone, so there is
         // nothing left to tell.
-        if refresh.send(()).is_err() {
+        if refresh.send(ALL).is_err() {
             return;
         }
     }
@@ -1027,7 +1127,7 @@ async fn poll_loop(
     revert_deadline: RevertDeadline,
     clicks: tokio::sync::mpsc::UnboundedSender<String>,
     menu_clicks: tokio::sync::mpsc::UnboundedSender<String>,
-    mut refresh_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    mut refresh_rx: tokio::sync::mpsc::UnboundedReceiver<Backends>,
 ) {
     let mut net_state = Reconnecting::new();
     let mut bt_state = Reconnecting::new();
@@ -1051,9 +1151,14 @@ async fn poll_loop(
         // the next one early. A refresh that arrives while this loop is
         // mid-sample is not lost: the channel holds it and the next
         // `select!` takes it immediately.
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = refresh_rx.recv() => {}
+        let mut asked = tokio::select! {
+            _ = ticker.tick() => ALL,
+            Some(which) = refresh_rx.recv() => which,
+        };
+        // A burst of signals — a scan's worth of access points — is one
+        // pass, for every icon any of them was about.
+        while let Ok(more) = refresh_rx.try_recv() {
+            asked |= more;
         }
 
         refresh_prefs(&mut prefs, &mut prefs_load_failed);
@@ -1078,28 +1183,30 @@ async fn poll_loop(
             *is_up = slot.slot.lock().await.is_some();
         }
 
-        let net = needs_sampling(wanted[0], up[0]).then_some(());
-        let net = match net {
-            Some(()) => Some(sample_network(&mut net_state).await),
-            None => None,
+        // Only the icons this refresh is for — and, of those, only the
+        // ones that are wanted or still up (`needs_sampling`).
+        let due = |i: usize, bit: Backends| asked & bit != 0 && needs_sampling(wanted[i], up[i]);
+        let net = match due(0, NETWORK) {
+            true => Some(sample_network(&mut net_state).await),
+            false => None,
         };
-        let bt = match needs_sampling(wanted[1], up[1]) {
+        let bt = match due(1, BLUETOOTH) {
             true => Some(sample_bluetooth(&mut bt_state).await),
             false => None,
         };
-        let ka = match needs_sampling(wanted[2], up[2]) {
+        let ka = match due(2, KEEP_AWAKE) {
             true => Some(sample_keep_awake(&mut power_state).await),
             false => None,
         };
-        let nl = match needs_sampling(wanted[3], up[3]) {
+        let nl = match due(3, NIGHT_LIGHT) {
             true => Some(sample_night_light(&night_light_belief).await),
             false => None,
         };
-        let pw = match needs_sampling(wanted[4], up[4]) {
+        let pw = match due(4, POWER) {
             true => Some(sample_power(&mut upower_state, &mut profiles_state).await),
             false => None,
         };
-        let dp = match needs_sampling(wanted[5], up[5]) {
+        let dp = match due(5, DISPLAYS) {
             true => Some(sample_displays(&mut bus_state, &revert_deadline).await),
             false => None,
         };
@@ -2430,7 +2537,7 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
 /// arrived during the wait.
 async fn scan_then_refresh(
     net_state: &mut Reconnecting<hyprforge_network::NetworkManagerBackend>,
-    refresh: tokio::sync::mpsc::UnboundedSender<()>,
+    refresh: tokio::sync::mpsc::UnboundedSender<Backends>,
 ) {
     let Some(backend) = network_backend(net_state).await else {
         return;
@@ -2443,7 +2550,7 @@ async fn scan_then_refresh(
     }
     tokio::spawn(async move {
         tokio::time::sleep(SCAN_SETTLE).await;
-        let _ = refresh.send(());
+        let _ = refresh.send(ALL);
     });
 }
 
@@ -2472,7 +2579,7 @@ struct MenuClickState {
 
 async fn handle_menu_clicks(
     mut actions: tokio::sync::mpsc::UnboundedReceiver<String>,
-    refresh: tokio::sync::mpsc::UnboundedSender<()>,
+    refresh: tokio::sync::mpsc::UnboundedSender<Backends>,
     night_light_belief: NightLightBelief,
     revert_deadline: RevertDeadline,
 ) {
@@ -2513,7 +2620,7 @@ async fn handle_menu_clicks(
             .await
         {
             Ok(()) if refresh_after => {
-                let _ = refresh.send(());
+                let _ = refresh.send(ALL);
             }
             Ok(()) => {}
             Err(e) => tracing::warn!(error = %e, "tray menu action failed"),
@@ -2526,7 +2633,7 @@ async fn perform_menu_action(
     state: &mut MenuClickState,
     night_light_belief: &NightLightBelief,
     revert_deadline: &RevertDeadline,
-    refresh: &tokio::sync::mpsc::UnboundedSender<()>,
+    refresh: &tokio::sync::mpsc::UnboundedSender<Backends>,
 ) -> anyhow::Result<()> {
     match action {
         MenuAction::OpenSettings(screen) => {
@@ -2699,6 +2806,18 @@ async fn perform_menu_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every subscription is a rule the bus will take: a misspelt name
+    /// would otherwise subscribe to nothing and say nothing about it.
+    #[test]
+    fn every_signal_subscription_is_a_valid_match_rule_for_one_icon() {
+        for (sender, interface, member, which) in SIGNALS {
+            assert!(signal_rule(sender, Some(interface), Some(member)).is_ok(), "{sender} {interface}.{member}");
+            assert_eq!(which.count_ones(), 1, "{sender}: a signal refreshes one icon, not several");
+        }
+        assert!(signal_rule("dev.hyprforge.Displayd", None, None).is_ok());
+        assert_eq!(ALL.count_ones(), 6, "one bit per icon");
+    }
     use hyprforge_bluetooth::DeviceKind;
     use hyprforge_tray::menu::ItemKind;
 

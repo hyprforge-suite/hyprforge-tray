@@ -62,9 +62,11 @@ data (`network_item`, `bluetooth_item`, `keep_awake_item`,
 counterparts in `trayd.rs`, and
 the pure model in `src/item.rs` / `src/menu.rs`) — no D-Bus, no bar, no
 radio, so the interesting question is testable without any of the
-three. Everything else in `trayd.rs` is plumbing: polling the
-backends, keeping one `TrayIcon` per item in sync, and re-announcing
-when a bar restarts.
+three. Everything else in `trayd.rs` is plumbing: following the
+backends — an icon is refreshed the moment its service signals a change
+(`watch_signals`), with a slow poll for the two that send none, night
+light and keep awake — keeping one `TrayIcon` per item in sync, and
+re-announcing when a bar restarts.
 
 ## Two failure modes this always names
 

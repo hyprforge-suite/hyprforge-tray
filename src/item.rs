@@ -57,6 +57,10 @@ impl Status {
     }
 }
 
+/// What a click opens when it is Processes rather than a Settings
+/// screen — the pressure icon's. A name no Settings screen has.
+pub const OPEN_PROCMAN: &str = "@procman";
+
 /// One tray icon's entire visible state.
 ///
 /// Icons are named, never drawn. The name is resolved by the host against
@@ -104,6 +108,9 @@ impl TrayItem {
             // which shows both.
             "hyprforge-power" => Some("power"),
             "hyprforge-displays" => Some("displays"),
+            // Not a Settings screen: what is waiting is shown in
+            // Processes. `hyprforge-trayd` knows this name.
+            "hyprforge-pressure" => Some(OPEN_PROCMAN),
             // An id nothing claims falls through to `None`.
             _ => None,
         }

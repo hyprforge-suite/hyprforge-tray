@@ -129,8 +129,9 @@ const KEEP_AWAKE: Backends = 1 << 2;
 const NIGHT_LIGHT: Backends = 1 << 3;
 const POWER: Backends = 1 << 4;
 const DISPLAYS: Backends = 1 << 5;
+const PRESSURE: Backends = 1 << 6;
 /// Every icon: the fallback tick, a menu opened, `tray.toml` changed.
-const ALL: Backends = 0b11_1111;
+const ALL: Backends = 0b111_1111;
 
 /// How often a failed `TrayIcon::register` or a not-yet-present watcher
 /// is retried. Short enough that a bar starting up is followed quickly,
@@ -294,6 +295,16 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
+    let pressure_icon = register_with_retry(
+        pressure_item(&Err("not read yet".to_string())),
+        pressure_menu(&Err("not read yet".to_string())),
+        6,
+        serving,
+        clicks_tx.clone(),
+        menu_clicks_tx.clone(),
+    )
+    .await;
+
     let icons = vec![
         ManagedIcon::new(network_icon, 0),
         ManagedIcon::new(bluetooth_icon, 1),
@@ -301,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
         ManagedIcon::new(night_light_icon, 3),
         ManagedIcon::new(power_icon, 4),
         ManagedIcon::new(displays_icon, 5),
+        ManagedIcon::new(pressure_icon, 6),
     ];
 
     // This daemon's own memory of whether night light is on — see
@@ -327,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     let revert_task = tokio::spawn(watch_display_reverts(revert_deadline, refresh_tx.clone()));
     let signals_task = tokio::spawn(watch_signals(refresh_tx.clone()));
+    watch_pressure(refresh_tx.clone());
     let prefs_watch_task = tokio::spawn(prefs_watch_loop(refresh_tx));
     let reannounce_task = tokio::spawn(reannounce_loop(probe, icons));
 
@@ -1254,8 +1267,9 @@ async fn poll_loop(
             prefs.night_light,
             prefs.power,
             prefs.displays,
+            prefs.pressure,
         ];
-        let mut up = [false; 6];
+        let mut up = [false; 7];
         for (slot, is_up) in icons.iter().zip(up.iter_mut()) {
             *is_up = slot.slot.lock().await.is_some();
         }
@@ -1287,12 +1301,16 @@ async fn poll_loop(
             true => Some(sample_displays(&mut bus_state, &revert_deadline).await),
             false => None,
         };
+        let pr = match due(6, PRESSURE) {
+            true => Some(sample_pressure()),
+            false => None,
+        };
 
         // One row per icon, lined up against `icons` in the same fixed
         // order `main` registered them in — see `ManagedIcon`'s doc
         // comment for why this is a loop rather than four repeated
         // `sync_icon` calls.
-        let ticks: [Option<(TrayItem, Menu)>; 6] = [net, bt, ka, nl, pw, dp];
+        let ticks: [Option<(TrayItem, Menu)>; 7] = [net, bt, ka, nl, pw, dp, pr];
         for ((icon, sampled), want) in icons.iter().zip(ticks).zip(wanted) {
             let Some((item, menu)) = sampled else { continue };
             sync_icon(&icon.slot, want, item, menu, icon.index, serving, &clicks, &menu_clicks).await;
@@ -1321,9 +1339,17 @@ async fn handle_clicks(mut clicks: tokio::sync::mpsc::UnboundedReceiver<String>)
 /// with no saved connection, for instance, since a tray menu has nowhere
 /// to type one.
 fn spawn_settings(screen: &str) {
-    match tokio::process::Command::new("hyprforge-settings")
-        .arg("--screen")
-        .arg(screen)
+    // The one target that is not a Settings screen: the pressure icon
+    // opens Processes, where what is waiting can be seen.
+    let mut command = match screen {
+        OPEN_PROCMAN => tokio::process::Command::new("hyprforge-procman"),
+        _ => {
+            let mut c = tokio::process::Command::new("hyprforge-settings");
+            c.arg("--screen").arg(screen);
+            c
+        }
+    };
+    match command
         // The child's output goes nowhere rather than inheriting this
         // daemon's. A GUI started from here prints its own renderer
         // chatter — wgpu alone logs its adapter and surface formats at
@@ -1339,7 +1365,7 @@ fn spawn_settings(screen: &str) {
     {
         Ok(_) => {}
         Err(e) => {
-            tracing::warn!(error = %e, screen = %screen, "failed to launch hyprforge-settings")
+            tracing::warn!(error = %e, screen = %screen, "failed to launch what the click opens")
         }
     }
 }
@@ -2151,6 +2177,78 @@ fn night_light_menu(state: &NightLightState) -> Menu {
     radio_menu(vec![toggle], content, settings_row)
 }
 
+/// What a click on the pressure icon opens: Processes, not a Settings
+/// screen — the only icon whose subject lives somewhere else. Shared
+/// with `TrayItem::activate_screen`, which names it for the click.
+const OPEN_PROCMAN: &str = hyprforge_tray::item::OPEN_PROCMAN;
+
+const PRESSURE_ITEM_ID: &str = "hyprforge-pressure";
+
+/// Reads the pressure files now. No D-Bus, no process: three small
+/// files, which is why it is called on the refresh path directly.
+fn sample_pressure() -> (TrayItem, Menu) {
+    let reading = hyprforge_tray::pressure::read(std::path::Path::new("/proc/pressure"));
+    (pressure_item(&reading), pressure_menu(&reading))
+}
+
+/// Starts the thread that sleeps on the kernel's pressure triggers and
+/// asks for this icon's refresh when they fire — then every few seconds
+/// until the machine is calm. On a calm machine it costs nothing; where
+/// triggers are refused, the minute-long fallback tick still reads it.
+fn watch_pressure(refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
+    let spawned = std::thread::Builder::new().name("pressure".into()).spawn(move || {
+        let watched = hyprforge_tray::pressure::watch(std::path::Path::new("/proc/pressure"), Duration::from_secs(3), || refresh.send(PRESSURE).is_ok());
+        if let Err(why) = watched {
+            tracing::info!("pressure is read once a minute only: {why}");
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "the pressure watch could not start");
+    }
+}
+
+/// The pressure icon, from a reading — or from why there is none, which
+/// is never shown as a calm machine. Every state `Active`: an icon the
+/// user switched on is never hidden by this daemon.
+fn pressure_item(reading: &Result<hyprforge_tray::pressure::Pressure, String>) -> TrayItem {
+    use hyprforge_tray::pressure::{level, worst, Level};
+    let (icon_name, tooltip_title, tooltip_body) = match reading {
+        Err(why) => ("dialog-warning", "Pressure unavailable".to_string(), why.clone()),
+        Ok(p) => {
+            let (what, share) = worst(p);
+            let body = format!("Memory {:.0}% · disk {:.0}% · processor {:.0}%", p.memory, p.io, p.cpu);
+            match level(p) {
+                Level::Calm => ("view-statistics-symbolic", "Nothing is waiting".to_string(), body),
+                Level::Strained => ("messagebox_warning-symbolic", format!("Waiting on {what} {share:.0}% of the time"), body),
+                Level::Heavy => ("emblem-important-symbolic", format!("Waiting on {what} {share:.0}% of the time — this is why it's slow"), body),
+            }
+        }
+    };
+    TrayItem {
+        id: PRESSURE_ITEM_ID.to_string(),
+        category: Category::SystemServices,
+        status: TrayStatus::Active,
+        title: "Pressure".to_string(),
+        icon_name: icon_name.to_string(),
+        tooltip_title,
+        tooltip_body,
+    }
+}
+
+/// The pressure menu: the three shares as rows, and Processes.
+fn pressure_menu(reading: &Result<hyprforge_tray::pressure::Pressure, String>) -> Menu {
+    let open = MenuItem::standard("Open Processes…", "pressure:open");
+    let rows = match reading {
+        Err(why) => vec![MenuItem::disabled(format!("Pressure unavailable — {why}"))],
+        Ok(p) => vec![
+            MenuItem::disabled(format!("Memory: waiting {:.0}%", p.memory)),
+            MenuItem::disabled(format!("Disk: waiting {:.0}%", p.io)),
+            MenuItem::disabled(format!("Processor: waiting {:.0}%", p.cpu)),
+        ],
+    };
+    radio_menu(rows, Vec::new(), open)
+}
+
 const POWER_ITEM_ID: &str = "hyprforge-power";
 
 /// What the battery half of the power icon knows this tick.
@@ -2565,6 +2663,7 @@ fn parse_menu_action(action: &str) -> Option<MenuAction> {
         "display:settings" => Some(MenuAction::OpenSettings("displays")),
         "display:keep" => Some(MenuAction::DisplayKeep),
         "display:revert" => Some(MenuAction::DisplayRevert),
+        "pressure:open" => Some(MenuAction::OpenSettings(OPEN_PROCMAN)),
         _ => {
             if let Some(hex) = action.strip_prefix("wifi:connect:") {
                 hex_decode(hex).map(MenuAction::WifiConnect)
@@ -2926,7 +3025,7 @@ mod tests {
         }
         assert!(signal_rule("dev.hyprforge.Displayd", None, None).is_ok());
         assert!(signal_rule("org.freedesktop.NetworkManager", Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged")).is_ok());
-        assert_eq!(ALL.count_ones(), 6, "one bit per icon");
+        assert_eq!(ALL.count_ones(), 7, "one bit per icon");
     }
     use hyprforge_bluetooth::DeviceKind;
     use hyprforge_tray::menu::ItemKind;
@@ -3009,6 +3108,10 @@ mod tests {
         "dialog-warning",
         "dialog-information",
     ];
+    // Calm, waiting, waiting a lot — each its own `breeze-dark` name, so
+    // the three states never share a picture — and the shared fallback.
+    const PRESSURE_ICON_NAMES: &[&str] =
+        &["view-statistics-symbolic", "messagebox_warning-symbolic", "emblem-important-symbolic", "dialog-warning"];
 
     fn net_status(radio: RadioState, connected: Option<&str>) -> NetStatus {
         NetStatus { radio, connected_to: connected.map(Ssid::new) }
@@ -3402,7 +3505,7 @@ mod tests {
     #[test]
     fn a_missing_tray_toml_refreshes_to_the_defaults() {
         with_temp_config_home(|_dir| {
-            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto };
+            let mut current = Prefs { network: false, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, pressure: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert!(current.network, "a missing file is first run: both icons shown");
@@ -3421,12 +3524,12 @@ mod tests {
             std::fs::create_dir_all(tray_toml.parent().unwrap()).unwrap();
             std::fs::write(&tray_toml, "network = yes please\n").unwrap();
 
-            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto };
+            let mut current = Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, pressure: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto };
             let mut warned = false;
             refresh_prefs(&mut current, &mut warned);
             assert_eq!(
                 current,
-                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto },
+                Prefs { network: true, bluetooth: false, keep_awake: false, night_light: false, power: false, displays: false, pressure: false, menu_y_offset: 32, menu_closes_on_click_outside: true, menu: prefs::MenuMode::Auto },
                 "a failed read must not change what is currently shown"
             );
             assert!(warned, "the failure is reported");
@@ -3904,6 +4007,48 @@ mod tests {
         let row = not_held.flatten().into_iter().find(|i| i.kind == ItemKind::Checkmark).unwrap();
         assert_eq!(row.toggle, Some(false));
         assert_eq!(row.action.as_deref(), Some("keepawake:on"));
+    }
+
+    // --- pressure ----------------------------------------------------------
+
+    fn pressure(memory: f32) -> Result<hyprforge_tray::pressure::Pressure, String> {
+        Ok(hyprforge_tray::pressure::Pressure { memory, ..Default::default() })
+    }
+
+    #[test]
+    fn every_pressure_icon_is_a_documented_name_shown_in_every_state() {
+        let items = [pressure_item(&pressure(0.0)), pressure_item(&pressure(15.0)), pressure_item(&pressure(60.0)), pressure_item(&Err("no PSI".into()))];
+        for item in &items {
+            assert!(PRESSURE_ICON_NAMES.contains(&item.icon_name.as_str()), "invented icon name: {}", item.icon_name);
+            assert_eq!(item.status, TrayStatus::Active, "an icon the user switched on is never hidden");
+        }
+        let names: std::collections::HashSet<&str> = items.iter().map(|i| i.icon_name.as_str()).collect();
+        assert_eq!(names.len(), 4, "calm, waiting, waiting a lot and unknown each look different");
+    }
+
+    /// No pressure to read is not a calm machine.
+    #[test]
+    fn pressure_that_could_not_be_read_never_looks_calm() {
+        let unknown = pressure_item(&Err("this kernel doesn't report pressure".into()));
+        let calm = pressure_item(&pressure(0.0));
+        assert_ne!(unknown.icon_name, calm.icon_name);
+        assert_ne!(unknown.tooltip_title, calm.tooltip_title);
+    }
+
+    /// A click opens Processes, where what is waiting is shown — from the
+    /// icon and from its menu's row.
+    #[test]
+    fn the_pressure_icon_opens_processes() {
+        assert_eq!(pressure_item(&pressure(0.0)).activate_screen(), Some(OPEN_PROCMAN));
+        assert!(matches!(parse_menu_action("pressure:open"), Some(MenuAction::OpenSettings(OPEN_PROCMAN))));
+        let menu = pressure_menu(&pressure(20.0));
+        assert!(format!("{menu:?}").contains("pressure:open"));
+    }
+
+    #[test]
+    fn the_tooltip_names_what_is_waited_on() {
+        let item = pressure_item(&Ok(hyprforge_tray::pressure::Pressure { io: 45.0, memory: 5.0, cpu: 1.0 }));
+        assert!(item.tooltip_title.contains("disk") && item.tooltip_title.contains("45"), "{}", item.tooltip_title);
     }
 
     // --- night light -------------------------------------------------------

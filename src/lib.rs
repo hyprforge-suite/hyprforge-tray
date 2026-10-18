@@ -42,6 +42,7 @@ pub mod item;
 pub mod launch;
 pub mod menu;
 pub mod prefs;
+pub mod pressure;
 pub mod sni;
 
 pub use launch::OPENED_PREFIX;

@@ -43,8 +43,11 @@ them in.
   power profile, over UPower and `power-profiles-daemon`) and
   `hyprforge-ecosystem::sunset_control` (night light, over
   `hyprctl hyprsunset`) and `hyprforge-displayd` (display layouts, over
-  its own D-Bus interface, through `hyprforge-core::displayd_proxy`), and forwards a click to
-  `hyprforge-settings --screen <name>`.
+  its own D-Bus interface, through `hyprforge-core::displayd_proxy`), plus
+  the kernel's pressure (`pressure`: what the machine is waiting on, from
+  `/proc/pressure`, woken by its triggers rather than polled), and
+  forwards a click to `hyprforge-settings --screen <name>` — or, for
+  pressure, opens `hyprforge-procman`.
 - **`hyprforge-traymenu`** (`src/bin/traymenu/`) — the popup that draws
   an item's right-click menu.
 

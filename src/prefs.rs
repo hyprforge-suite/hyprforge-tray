@@ -53,6 +53,10 @@ pub struct Prefs {
     /// switching one. Off by default like the others added after the
     /// first two.
     pub displays: bool,
+    /// Whether the machine is waiting on memory, disk or the processor —
+    /// the kernel's pressure, and Processes a click away. Off by default,
+    /// like every icon after the first two.
+    pub pressure: bool,
     /// Logical pixels below the bar's own reserved area at which the tray
     /// menu opens — see this module's own doc. (It was once added to the
     /// click's Y instead; that made the menu's position depend on where
@@ -168,6 +172,7 @@ impl Default for Prefs {
             night_light: false,
             power: false,
             displays: false,
+            pressure: false,
             menu_y_offset: 32,
             menu_closes_on_click_outside: true,
             menu: MenuMode::Auto,
@@ -342,6 +347,7 @@ mod tests {
             night_light: true,
             power: true,
             displays: true,
+            pressure: true,
             menu_y_offset: 50,
             menu_closes_on_click_outside: false,
             menu: MenuMode::Dbusmenu,

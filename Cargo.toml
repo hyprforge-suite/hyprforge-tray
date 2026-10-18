@@ -59,6 +59,9 @@ toml = "1.1"
 anyhow = "1"
 # `StreamExt::next`, for displayd's revert signals.
 futures-util = "0.3"
+# `poll` on the pressure files' triggers, which wait for a stall rather
+# than polling for one — see `pressure`.
+libc = "0.2"
 
 # By crates.io version: this manifest has to work unchanged both inside
 # the Hyprforge workspace, where this directory is a submodule and the

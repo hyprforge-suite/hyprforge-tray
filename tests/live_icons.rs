@@ -96,6 +96,10 @@ const EVERY_ICON: &[&str] = &[
     // Displays: normal, and a layout waiting to be kept.
     "monitor-symbolic",
     "preferences-desktop-display-randr-symbolic",
+    // Pressure: calm, waiting, waiting a lot.
+    "view-statistics-symbolic",
+    "messagebox_warning-symbolic",
+    "emblem-important-symbolic",
     // Shared fallbacks. These two are the one deliberate exception to
     // "every name is symbolic" (see `SHARED_FALLBACK_ICONS` below): they
     // are the identical error state on every item, not one item's

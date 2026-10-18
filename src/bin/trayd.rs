@@ -60,6 +60,7 @@ use hyprforge_bluetooth::backend::{for_display as bt_for_display, BluetoothBacke
 use hyprforge_bluetooth::{Address, AdapterState, BlueZBackend, Device};
 use hyprforge_bluetooth::Status as BtStatus;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use hyprforge_core::displayd_proxy::DisplaydProxy;
 use hyprforge_ecosystem::sunset_control::{Hyprsunset, SunsetBackend, SunsetControlError};
 use hyprforge_network::backend::{for_display as net_for_display, NetworkBackend, SavedNetwork};
@@ -1022,8 +1023,10 @@ fn prefs_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
 /// interface, member, and the icon. power-profiles-daemon answers to two
 /// names — the newer `org.freedesktop.UPower.PowerProfiles` and the old
 /// `net.hadess.PowerProfiles`, both owned here — so both are heard.
-const SIGNALS: [(&str, &str, &str, Backends); 7] = [
-    ("org.freedesktop.NetworkManager", "org.freedesktop.DBus.Properties", "PropertiesChanged", NETWORK),
+///
+/// NetworkManager is not in this list: its signals are read, not just
+/// counted — see [`network_signal_matters`].
+const SIGNALS: [(&str, &str, &str, Backends); 6] = [
     ("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged", BLUETOOTH),
     ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded", BLUETOOTH),
     ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved", BLUETOOTH),
@@ -1031,6 +1034,49 @@ const SIGNALS: [(&str, &str, &str, Backends); 7] = [
     ("org.freedesktop.UPower.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
     ("net.hadess.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
 ];
+
+/// Whether a NetworkManager `PropertiesChanged` is worth re-reading the
+/// network for. The connected access point reports its strength every
+/// six seconds here, wobbling between 69 and 77 — all "good" — and each
+/// report re-read the whole network: about 175 wakeups apiece, more often
+/// than the ten-second poll it replaced had. The icon shows a band, so a
+/// signal that changes only `Strength` refreshes only when the band it
+/// lands in differs from the last one that access point was in. Anything
+/// else — a device's state, a connection coming or going — refreshes at
+/// once. An open menu shows the exact figure, and opening one re-reads
+/// everything regardless.
+fn network_signal_matters(path: &str, interface: &str, changed: &[(&str, Option<u8>)], bands: &mut HashMap<String, &'static str>) -> bool {
+    let strength_only = interface == "org.freedesktop.NetworkManager.AccessPoint" && !changed.is_empty() && changed.iter().all(|(k, _)| *k == "Strength");
+    if !strength_only {
+        return true;
+    }
+    let Some(Some(strength)) = changed.iter().find(|(k, _)| *k == "Strength").map(|(_, v)| *v) else { return true };
+    let band = wifi_signal_icon(strength);
+    bands.insert(path.to_string(), band) != Some(band)
+}
+
+/// NetworkManager's signals, each read for whether it changes the icon.
+async fn listen_network(conn: zbus::Connection, refresh: tokio::sync::mpsc::UnboundedSender<Backends>) -> Result<(), zbus::Error> {
+    let rule = signal_rule("org.freedesktop.NetworkManager", Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged"))?;
+    let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, Some(16)).await?;
+    let mut bands = HashMap::new();
+    while let Some(message) = stream.next().await {
+        let Ok(message) = message else { continue };
+        let path = message.header().path().map(|p| p.to_string()).unwrap_or_default();
+        let body: Option<(String, HashMap<String, zbus::zvariant::OwnedValue>, Vec<String>)> = message.body().deserialize().ok();
+        let matters = match &body {
+            Some((interface, changed, _)) => {
+                let changed: Vec<(&str, Option<u8>)> = changed.iter().map(|(k, v)| (k.as_str(), u8::try_from(v).ok())).collect();
+                network_signal_matters(&path, interface, &changed, &mut bands)
+            }
+            None => true,
+        };
+        if matters && refresh.send(NETWORK).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
 
 /// The match rule for one subscription.
 fn signal_rule(sender: &'static str, interface: Option<&'static str>, member: Option<&'static str>) -> Result<zbus::MatchRule<'static>, zbus::Error> {
@@ -1078,6 +1124,7 @@ async fn watch_signals(refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
         let mut tasks = Vec::new();
         match zbus::Connection::system().await {
             Ok(conn) => {
+                tasks.push(tokio::spawn(listen_network(conn.clone(), refresh.clone())));
                 for (sender, interface, member, which) in SIGNALS {
                     tasks.push(tokio::spawn(listen(conn.clone(), sender, Some(interface), Some(member), which, refresh.clone())));
                 }
@@ -2807,6 +2854,23 @@ async fn perform_menu_action(
 mod tests {
     use super::*;
 
+    /// The strengths this machine's access point reported, six seconds
+    /// apart: all "good", so after the first, none re-reads the network
+    /// — until one crosses into "excellent". Anything but strength does.
+    #[test]
+    fn only_a_strength_that_changes_the_icons_band_rereads_the_network() {
+        let ap = "/org/freedesktop/NetworkManager/AccessPoint/1";
+        let iface = "org.freedesktop.NetworkManager.AccessPoint";
+        let mut bands = HashMap::new();
+        assert!(network_signal_matters(ap, iface, &[("Strength", Some(0x45))], &mut bands), "the first says where it is");
+        for s in [0x4d, 0x48, 0x4b] {
+            assert!(!network_signal_matters(ap, iface, &[("Strength", Some(s))], &mut bands), "{s}: still good");
+        }
+        assert!(network_signal_matters(ap, iface, &[("Strength", Some(81))], &mut bands), "excellent now");
+        assert!(network_signal_matters("/org/freedesktop/NetworkManager/Devices/3", "org.freedesktop.NetworkManager.Device.Wireless", &[("LastScan", None)], &mut bands));
+        assert!(network_signal_matters(ap, iface, &[("Strength", Some(81)), ("Ssid", None)], &mut bands), "more than strength changed");
+    }
+
     /// Every subscription is a rule the bus will take: a misspelt name
     /// would otherwise subscribe to nothing and say nothing about it.
     #[test]
@@ -2816,6 +2880,7 @@ mod tests {
             assert_eq!(which.count_ones(), 1, "{sender}: a signal refreshes one icon, not several");
         }
         assert!(signal_rule("dev.hyprforge.Displayd", None, None).is_ok());
+        assert!(signal_rule("org.freedesktop.NetworkManager", Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged")).is_ok());
         assert_eq!(ALL.count_ones(), 6, "one bit per icon");
     }
     use hyprforge_bluetooth::DeviceKind;

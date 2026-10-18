@@ -1029,16 +1029,20 @@ fn prefs_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
 ///
 /// The last field is the properties that never change an icon, so a
 /// `PropertiesChanged` naming only those is not a reason to re-read
-/// anything. After the install, UPower's `UpdateTime` — a timestamp on
-/// the battery and its summary device — set off a full power read of
-/// ~150 wakeups each time; a Bluetooth scan's advertisements (`RSSI`,
-/// `ManufacturerData`, `ServiceData`, `TxPower`) would do the same per
-/// device seen. None is shown on an icon.
+/// anything. After the install, UPower's thirty-second update — its
+/// `UpdateTime` timestamp, `EnergyRate`, `Voltage`, `Energy` and a new
+/// `TimeToEmpty`, sent even while the battery is fully charged — set off a
+/// full power read of ~245 wakeups each time. None of those is on the
+/// icon: `Percentage` and `State` are separate properties and still
+/// refresh at once, and the time left is shown to the minute, which the
+/// one-minute poll already refreshes at. A Bluetooth scan's
+/// advertisements (`RSSI`, `ManufacturerData`, `ServiceData`, `TxPower`)
+/// would do the same per device seen, and are not shown either.
 const SIGNALS: [(&str, &str, &str, Backends, &[&str]); 6] = [
     ("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged", BLUETOOTH, &["RSSI", "ManufacturerData", "ServiceData", "TxPower"]),
     ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded", BLUETOOTH, &[]),
     ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved", BLUETOOTH, &[]),
-    ("org.freedesktop.UPower", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &["UpdateTime"]),
+    ("org.freedesktop.UPower", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &["UpdateTime", "EnergyRate", "Voltage", "Energy", "TimeToEmpty", "TimeToFull"]),
     ("org.freedesktop.UPower.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &[]),
     ("net.hadess.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &[]),
 ];
@@ -2902,11 +2906,13 @@ mod tests {
     /// a property invalidated without a value.
     #[test]
     fn a_change_to_nothing_an_icon_shows_is_ignored() {
-        let upower = ["UpdateTime"];
-        assert!(only_ignorable(&["UpdateTime"], &[], &upower));
-        assert!(!only_ignorable(&["UpdateTime", "Percentage"], &[], &upower));
-        assert!(!only_ignorable(&["UpdateTime"], &["State"], &upower));
-        assert!(!only_ignorable(&[], &[], &upower), "an empty change is still a change");
+        let upower = SIGNALS.iter().find(|s| s.0 == "org.freedesktop.UPower").unwrap().4;
+        // The update this machine's battery sent every thirty seconds.
+        assert!(only_ignorable(&["UpdateTime", "TimeToEmpty", "EnergyRate", "Voltage", "Energy"], &[], upower));
+        assert!(!only_ignorable(&["UpdateTime", "Percentage"], &[], upower));
+        assert!(!only_ignorable(&["State"], &[], upower), "plugged in or out: at once");
+        assert!(!only_ignorable(&["UpdateTime"], &["State"], upower));
+        assert!(!only_ignorable(&[], &[], upower), "an empty change is still a change");
         assert!(only_ignorable(&["RSSI", "ManufacturerData"], &[], &["RSSI", "ManufacturerData", "ServiceData", "TxPower"]));
     }
 

@@ -1026,14 +1026,28 @@ fn prefs_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
 ///
 /// NetworkManager is not in this list: its signals are read, not just
 /// counted — see [`network_signal_matters`].
-const SIGNALS: [(&str, &str, &str, Backends); 6] = [
-    ("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged", BLUETOOTH),
-    ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded", BLUETOOTH),
-    ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved", BLUETOOTH),
-    ("org.freedesktop.UPower", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
-    ("org.freedesktop.UPower.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
-    ("net.hadess.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER),
+///
+/// The last field is the properties that never change an icon, so a
+/// `PropertiesChanged` naming only those is not a reason to re-read
+/// anything. After the install, UPower's `UpdateTime` — a timestamp on
+/// the battery and its summary device — set off a full power read of
+/// ~150 wakeups each time; a Bluetooth scan's advertisements (`RSSI`,
+/// `ManufacturerData`, `ServiceData`, `TxPower`) would do the same per
+/// device seen. None is shown on an icon.
+const SIGNALS: [(&str, &str, &str, Backends, &[&str]); 6] = [
+    ("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged", BLUETOOTH, &["RSSI", "ManufacturerData", "ServiceData", "TxPower"]),
+    ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded", BLUETOOTH, &[]),
+    ("org.bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved", BLUETOOTH, &[]),
+    ("org.freedesktop.UPower", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &["UpdateTime"]),
+    ("org.freedesktop.UPower.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &[]),
+    ("net.hadess.PowerProfiles", "org.freedesktop.DBus.Properties", "PropertiesChanged", POWER, &[]),
 ];
+
+/// Whether a `PropertiesChanged` changed nothing but properties no icon
+/// shows. An invalidated property might be anything, so it counts.
+fn only_ignorable(changed: &[&str], invalidated: &[&str], ignore: &[&str]) -> bool {
+    !changed.is_empty() && invalidated.is_empty() && changed.iter().all(|k| ignore.contains(k))
+}
 
 /// Whether a NetworkManager `PropertiesChanged` is worth re-reading the
 /// network for. The connected access point reports its strength every
@@ -1110,10 +1124,22 @@ async fn watch_signals(refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
         interface: Option<&'static str>,
         member: Option<&'static str>,
         which: Backends,
+        ignore: &'static [&'static str],
         refresh: tokio::sync::mpsc::UnboundedSender<Backends>,
     ) -> Result<(), zbus::Error> {
         let mut stream = zbus::MessageStream::for_match_rule(signal_rule(sender, interface, member)?, &conn, Some(16)).await?;
-        while stream.next().await.is_some() {
+        while let Some(message) = stream.next().await {
+            if !ignore.is_empty() {
+                let body: Option<(String, HashMap<String, zbus::zvariant::OwnedValue>, Vec<String>)> =
+                    message.ok().and_then(|m| m.body().deserialize().ok());
+                if let Some((_, changed, invalidated)) = body {
+                    let keys: Vec<&str> = changed.keys().map(String::as_str).collect();
+                    let gone: Vec<&str> = invalidated.iter().map(String::as_str).collect();
+                    if only_ignorable(&keys, &gone, ignore) {
+                        continue;
+                    }
+                }
+            }
             if refresh.send(which).is_err() {
                 break;
             }
@@ -1125,14 +1151,14 @@ async fn watch_signals(refresh: tokio::sync::mpsc::UnboundedSender<Backends>) {
         match zbus::Connection::system().await {
             Ok(conn) => {
                 tasks.push(tokio::spawn(listen_network(conn.clone(), refresh.clone())));
-                for (sender, interface, member, which) in SIGNALS {
-                    tasks.push(tokio::spawn(listen(conn.clone(), sender, Some(interface), Some(member), which, refresh.clone())));
+                for (sender, interface, member, which, ignore) in SIGNALS {
+                    tasks.push(tokio::spawn(listen(conn.clone(), sender, Some(interface), Some(member), which, ignore, refresh.clone())));
                 }
             }
             Err(e) => tracing::debug!(error = %e, "system bus unreachable; icons follow the poll alone"),
         }
         match zbus::Connection::session().await {
-            Ok(conn) => tasks.push(tokio::spawn(listen(conn, "dev.hyprforge.Displayd", None, None, DISPLAYS, refresh.clone()))),
+            Ok(conn) => tasks.push(tokio::spawn(listen(conn, "dev.hyprforge.Displayd", None, None, DISPLAYS, &[], refresh.clone()))),
             Err(e) => tracing::debug!(error = %e, "session bus unreachable"),
         }
         // A listener ends only when its bus does; try again after a
@@ -2871,11 +2897,24 @@ mod tests {
         assert!(network_signal_matters(ap, iface, &[("Strength", Some(81)), ("Ssid", None)], &mut bands), "more than strength changed");
     }
 
+    /// UPower's timestamp alone, as it arrived after the install, is no
+    /// reason to re-read the battery; a percentage beside it is, and so is
+    /// a property invalidated without a value.
+    #[test]
+    fn a_change_to_nothing_an_icon_shows_is_ignored() {
+        let upower = ["UpdateTime"];
+        assert!(only_ignorable(&["UpdateTime"], &[], &upower));
+        assert!(!only_ignorable(&["UpdateTime", "Percentage"], &[], &upower));
+        assert!(!only_ignorable(&["UpdateTime"], &["State"], &upower));
+        assert!(!only_ignorable(&[], &[], &upower), "an empty change is still a change");
+        assert!(only_ignorable(&["RSSI", "ManufacturerData"], &[], &["RSSI", "ManufacturerData", "ServiceData", "TxPower"]));
+    }
+
     /// Every subscription is a rule the bus will take: a misspelt name
     /// would otherwise subscribe to nothing and say nothing about it.
     #[test]
     fn every_signal_subscription_is_a_valid_match_rule_for_one_icon() {
-        for (sender, interface, member, which) in SIGNALS {
+        for (sender, interface, member, which, _) in SIGNALS {
             assert!(signal_rule(sender, Some(interface), Some(member)).is_ok(), "{sender} {interface}.{member}");
             assert_eq!(which.count_ones(), 1, "{sender}: a signal refreshes one icon, not several");
         }
